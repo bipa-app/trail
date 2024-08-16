@@ -6,10 +6,15 @@ publish = false
 
 [dependencies]
 anyhow = { version = "1.0.86", features = ["std"], default-features = false }
+http = { version = "1.1.0", default-features = false }
 opentelemetry = { version = "0.24.0", default-features = false }
 opentelemetry-appender-tracing = { version = "0.5.0", default-features = false }
+opentelemetry-contrib = { version = "0.16.0", default-features = false }
 opentelemetry-otlp = { version = "0.17.0", features = ["grpc-tonic", "logs", "metrics", "trace"], default-features = false }
 opentelemetry-semantic-conventions = { version = "0.16.0", default-features = false }
 opentelemetry_sdk = { version = "0.24.1", features = ["rt-tokio"], default-features = false }
+tonic = { version = "0.12.1", default-features = false }
+tower-layer = { version = "0.3.3", default-features = false }
+tower-service = { version = "0.3.3", default-features = false }
 tracing = { version = "0.1.40", default-features = false }
 tracing-subscriber = { version = "0.3.18", features = ["fmt", "env-filter"], default-features = false }
