@@ -1,3 +1,5 @@
+pub mod grpc;
+
 use anyhow::Context;
 use opentelemetry_otlp::WithExportConfig;
 use std::time::Duration;
