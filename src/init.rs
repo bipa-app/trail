@@ -27,10 +27,16 @@ pub fn init(
     let tracer_provider = tracer(otel_endpoint, resource.clone())?;
     let meter_provider = meter(otel_endpoint, resource.clone())?;
 
-    let logger =
-        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider);
+    let env_logger = env_logger::Builder::new().parse_filters(rust_log).build();
+    let otel_logger = opentelemetry_appender_log::OpenTelemetryLogBridge::new(&logger_provider);
 
-    tracing::subscriber::set_global_default(registry.with(logger))?;
+    log::set_max_level(env_logger.filter());
+    log::set_boxed_logger(Box::new(Logger(env_logger, otel_logger)))?;
+
+    tracing::subscriber::set_global_default(registry.with(
+        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider),
+    ))?;
+
     opentelemetry::global::set_tracer_provider(tracer_provider);
     opentelemetry::global::set_meter_provider(meter_provider);
 
@@ -95,4 +101,32 @@ fn resource(name: &'static str, version: &'static str) -> opentelemetry_sdk::Res
         opentelemetry::KeyValue::new(SERVICE_NAME, name),
         opentelemetry::KeyValue::new(SERVICE_VERSION, version),
     ])
+}
+
+struct Logger<P, L>(
+    env_logger::Logger,
+    opentelemetry_appender_log::OpenTelemetryLogBridge<P, L>,
+)
+where
+    P: opentelemetry::logs::LoggerProvider<Logger = L> + Send + Sync,
+    L: opentelemetry::logs::Logger + Send + Sync;
+
+impl<P, L> log::Log for Logger<P, L>
+where
+    P: opentelemetry::logs::LoggerProvider<Logger = L> + Send + Sync,
+    L: opentelemetry::logs::Logger + Send + Sync,
+{
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        self.0.enabled(metadata) || self.1.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        self.0.log(record);
+        self.1.log(record);
+    }
+
+    fn flush(&self) {
+        self.0.flush();
+        self.1.flush();
+    }
 }
