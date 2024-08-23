@@ -62,8 +62,6 @@ fn meter(
     opentelemetry_otlp::new_pipeline()
         .metrics(opentelemetry_sdk::runtime::Tokio)
         .with_exporter(exporter(otel_endpoint))
-        .with_period(Duration::from_secs(15))
-        .with_timeout(Duration::from_secs(5))
         .with_resource(resource)
         .build()
         .context("could not build metrics pipeline")
@@ -76,13 +74,6 @@ fn tracer(
     opentelemetry_otlp::new_pipeline()
         .tracing()
         .with_exporter(exporter(otel_endpoint))
-        .with_batch_config(
-            opentelemetry_sdk::trace::BatchConfigBuilder::default()
-                .with_max_queue_size(30000)
-                .with_max_export_batch_size(10000)
-                .with_scheduled_delay(Duration::from_secs(5))
-                .build(),
-        )
         .with_trace_config(opentelemetry_sdk::trace::Config::default().with_resource(resource))
         .install_batch(opentelemetry_sdk::runtime::Tokio)
         .context("could not build tracing pipeline")
