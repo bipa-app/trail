@@ -17,6 +17,8 @@ opentelemetry-contrib = { version = "0.16.0", default-features = false, optional
 opentelemetry-otlp = { version = "0.17.0", features = ["grpc-tonic", "logs", "metrics", "trace"], default-features = false, optional = true }
 opentelemetry-semantic-conventions = { version = "0.16.0", default-features = false, optional = true }
 opentelemetry_sdk = { version = "0.24.1", features = ["rt-tokio"], default-features = false, optional = true }
+sentry = { version = "0.34.0", features = ["panic", "reqwest", "rustls"], default-features = false, optional = true }
+sentry-tracing = { version = "0.34.0", default-features = false, optional = true }
 tonic = { version = "0.12.1", default-features = false, optional = true }
 tower-layer = { version = "0.3.3", default-features = false, optional = true }
 tower-service = { version = "0.3.3", default-features = false, optional = true }
@@ -29,11 +31,13 @@ init = [
     "anyhow",
     "env_logger",
     "log",
-    "opentelemetry-appender-tracing",
     "opentelemetry-appender-log",
+    "opentelemetry-appender-tracing",
     "opentelemetry-otlp",
     "opentelemetry-semantic-conventions",
     "opentelemetry_sdk",
+    "sentry",
+    "sentry-tracing",
     "tracing",
     "tracing-subscriber"
 ]
