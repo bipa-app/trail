@@ -64,6 +64,8 @@ fn meter(
     opentelemetry_otlp::new_pipeline()
         .metrics(opentelemetry_sdk::runtime::Tokio)
         .with_exporter(exporter(otel_endpoint))
+        .with_period(std::time::Duration::from_secs(20))
+        .with_timeout(std::time::Duration::from_secs(10))
         .with_resource(resource)
         .build()
         .context("could not build metrics pipeline")
