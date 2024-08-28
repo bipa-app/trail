@@ -1,7 +1,7 @@
 use anyhow::Context;
 use opentelemetry_otlp::WithExportConfig;
 use std::time::Duration;
-use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{layer::SubscriberExt, registry::Registry};
 
 pub struct Handle;
 
@@ -16,6 +16,7 @@ pub fn init(
     version: &'static str,
     otel_endpoint: &str,
     rust_log: &str,
+    tracing_registry: impl FnOnce(Registry) -> Registry,
 ) -> anyhow::Result<Handle> {
     let registry = tracing_subscriber::Registry::default()
         .with(tracing_subscriber::EnvFilter::new(rust_log))
@@ -33,9 +34,9 @@ pub fn init(
     log::set_max_level(env_logger.filter());
     log::set_boxed_logger(Box::new(Logger(env_logger, otel_logger)))?;
 
-    tracing::subscriber::set_global_default(registry.with(
+    tracing::subscriber::set_global_default(tracing_registry(registry.with(
         opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider),
-    ))?;
+    )))?;
 
     opentelemetry::global::set_tracer_provider(tracer_provider);
     opentelemetry::global::set_meter_provider(meter_provider);
