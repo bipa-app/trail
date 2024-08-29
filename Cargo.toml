@@ -23,7 +23,7 @@ tonic = { version = "0.12.1", default-features = false, optional = true }
 tower-layer = { version = "0.3.3", default-features = false, optional = true }
 tower-service = { version = "0.3.3", default-features = false, optional = true }
 tracing = { version = "0.1.40", default-features = false, optional = true }
-tracing-subscriber = { version = "0.3.18", features = ["fmt", "env-filter"], default-features = false, optional = true }
+tracing-subscriber = { version = "0.3.18", features = ["ansi", "env-filter", "fmt"], default-features = false, optional = true }
 
 [features]
 
