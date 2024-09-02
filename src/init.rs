@@ -24,7 +24,7 @@ pub fn init(
 
     let resource = resource(name, version);
 
-    let (guard, sentry) = sentry(sentry_dsn, version);
+    let (guard, sentry_layer, sentry_logger) = sentry(sentry_dsn, version);
     let logger_provider = logger(otel_endpoint, resource.clone())?;
     let tracer_provider = tracer(otel_endpoint, resource.clone())?;
     let meter_provider = meter(otel_endpoint, resource.clone())?;
@@ -33,9 +33,9 @@ pub fn init(
     let otel_logger = opentelemetry_appender_log::OpenTelemetryLogBridge::new(&logger_provider);
 
     log::set_max_level(env_logger.filter());
-    log::set_boxed_logger(Box::new(Logger(env_logger, otel_logger)))?;
+    log::set_boxed_logger(Box::new(Logger(env_logger, sentry_logger, otel_logger)))?;
 
-    tracing::subscriber::set_global_default(registry.with(sentry).with(
+    tracing::subscriber::set_global_default(registry.with(sentry_layer).with(
         opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider),
     ))?;
 
@@ -99,7 +99,14 @@ fn resource(name: &'static str, version: &'static str) -> opentelemetry_sdk::Res
     ])
 }
 
-fn sentry<S>(dsn: &str, version: &str) -> (sentry::ClientInitGuard, sentry_tracing::SentryLayer<S>)
+fn sentry<S>(
+    dsn: &str,
+    version: &str,
+) -> (
+    sentry::ClientInitGuard,
+    sentry_tracing::SentryLayer<S>,
+    sentry_log::SentryLogger<sentry_log::NoopLogger>,
+)
 where
     S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
 {
@@ -113,11 +120,16 @@ where
         .add_integration(SentryOtel),
     ));
 
-    (sentry, sentry_tracing::layer())
+    (
+        sentry,
+        sentry_tracing::layer(),
+        sentry_log::SentryLogger::new(),
+    )
 }
 
 struct Logger<P, L>(
     env_logger::Logger,
+    sentry_log::SentryLogger<sentry_log::NoopLogger>,
     opentelemetry_appender_log::OpenTelemetryLogBridge<P, L>,
 )
 where
@@ -130,17 +142,19 @@ where
     L: opentelemetry::logs::Logger + Send + Sync,
 {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        self.0.enabled(metadata) || self.1.enabled(metadata)
+        self.0.enabled(metadata) || self.1.enabled(metadata) || self.2.enabled(metadata)
     }
 
     fn log(&self, record: &log::Record<'_>) {
         self.0.log(record);
         self.1.log(record);
+        self.2.log(record);
     }
 
     fn flush(&self) {
         self.0.flush();
         self.1.flush();
+        self.2.flush();
     }
 }
 
