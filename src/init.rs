@@ -12,6 +12,7 @@ impl Drop for Handle {
 pub fn init(
     name: &'static str,
     version: &'static str,
+    instance: &str,
     otel_endpoint: &str,
     sentry_dsn: &str,
     rust_log: &str,
@@ -22,12 +23,10 @@ pub fn init(
         .with(tracing_subscriber::EnvFilter::new(rust_log))
         .with(tracing_subscriber::fmt::Layer::default().compact());
 
-    let resource = resource(name, version);
-
     let (guard, sentry_layer, sentry_logger) = sentry(sentry_dsn, version);
-    let logger_provider = logger(otel_endpoint, resource.clone())?;
-    let tracer_provider = tracer(otel_endpoint, resource.clone())?;
-    let meter_provider = meter(otel_endpoint, resource.clone())?;
+    let logger_provider = logger(otel_endpoint, name, version, instance)?;
+    let tracer_provider = tracer(otel_endpoint, name, version, instance)?;
+    let meter_provider = meter(otel_endpoint, name, version, instance)?;
 
     let env_logger = env_logger::Builder::new().parse_filters(rust_log).build();
     let otel_logger = opentelemetry_appender_log::OpenTelemetryLogBridge::new(&logger_provider);
@@ -47,11 +46,21 @@ pub fn init(
 
 fn logger(
     otel_endpoint: &str,
-    resource: opentelemetry_sdk::Resource,
+    name: &'static str,
+    version: &'static str,
+    instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::logs::LoggerProvider> {
+    use opentelemetry_semantic_conventions::resource::{
+        SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_VERSION,
+    };
+
     opentelemetry_otlp::new_pipeline()
         .logging()
-        .with_resource(resource)
+        .with_resource(opentelemetry_sdk::Resource::new([
+            opentelemetry::KeyValue::new(SERVICE_NAME, name),
+            opentelemetry::KeyValue::new(SERVICE_VERSION, version),
+            opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
+        ]))
         .with_exporter(exporter(otel_endpoint))
         .install_batch(opentelemetry_sdk::runtime::Tokio)
         .context("could not build logs pipeline")
@@ -59,26 +68,48 @@ fn logger(
 
 fn meter(
     otel_endpoint: &str,
-    resource: opentelemetry_sdk::Resource,
+    name: &'static str,
+    version: &'static str,
+    instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::metrics::SdkMeterProvider> {
+    use opentelemetry_semantic_conventions::resource::{
+        SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_NAMESPACE,
+    };
+
     opentelemetry_otlp::new_pipeline()
         .metrics(opentelemetry_sdk::runtime::Tokio)
         .with_exporter(exporter(otel_endpoint))
         .with_period(std::time::Duration::from_secs(20))
         .with_timeout(std::time::Duration::from_secs(10))
-        .with_resource(resource)
+        .with_resource(opentelemetry_sdk::Resource::new([
+            opentelemetry::KeyValue::new(SERVICE_NAMESPACE, name),
+            opentelemetry::KeyValue::new(SERVICE_NAME, version),
+            opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
+        ]))
         .build()
         .context("could not build metrics pipeline")
 }
 
 fn tracer(
     otel_endpoint: &str,
-    resource: opentelemetry_sdk::Resource,
+    name: &'static str,
+    version: &'static str,
+    instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::trace::TracerProvider> {
+    use opentelemetry_semantic_conventions::resource::{
+        SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_VERSION,
+    };
+
     opentelemetry_otlp::new_pipeline()
         .tracing()
         .with_exporter(exporter(otel_endpoint))
-        .with_trace_config(opentelemetry_sdk::trace::Config::default().with_resource(resource))
+        .with_trace_config(opentelemetry_sdk::trace::Config::default().with_resource(
+            opentelemetry_sdk::Resource::new([
+                opentelemetry::KeyValue::new(SERVICE_NAME, name),
+                opentelemetry::KeyValue::new(SERVICE_VERSION, version),
+                opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
+            ]),
+        ))
         .install_batch(opentelemetry_sdk::runtime::Tokio)
         .context("could not build tracing pipeline")
 }
@@ -88,15 +119,6 @@ fn exporter(endpoint: &str) -> opentelemetry_otlp::TonicExporterBuilder {
     opentelemetry_otlp::new_exporter()
         .tonic()
         .with_endpoint(endpoint)
-}
-
-fn resource(name: &'static str, version: &'static str) -> opentelemetry_sdk::Resource {
-    use opentelemetry_semantic_conventions::resource::{SERVICE_NAME, SERVICE_VERSION};
-
-    opentelemetry_sdk::Resource::new([
-        opentelemetry::KeyValue::new(SERVICE_NAME, name),
-        opentelemetry::KeyValue::new(SERVICE_VERSION, version),
-    ])
 }
 
 fn sentry<S>(
