@@ -12,6 +12,7 @@ impl Drop for Handle {
 pub fn init(
     name: &'static str,
     version: &'static str,
+    instance: &str,
     otel_endpoint: &str,
     sentry_dsn: &str,
     rust_log: &str,
@@ -23,9 +24,9 @@ pub fn init(
         .with(tracing_subscriber::fmt::Layer::default().compact());
 
     let (guard, sentry_layer, sentry_logger) = sentry(sentry_dsn, version);
-    let logger_provider = logger(otel_endpoint, name, version)?;
-    let tracer_provider = tracer(otel_endpoint, name, version)?;
-    let meter_provider = meter(otel_endpoint, name, version)?;
+    let logger_provider = logger(otel_endpoint, name, version, instance)?;
+    let tracer_provider = tracer(otel_endpoint, name, version, instance)?;
+    let meter_provider = meter(otel_endpoint, name, version, instance)?;
 
     let env_logger = env_logger::Builder::new().parse_filters(rust_log).build();
     let otel_logger = opentelemetry_appender_log::OpenTelemetryLogBridge::new(&logger_provider);
@@ -47,14 +48,18 @@ fn logger(
     otel_endpoint: &str,
     name: &'static str,
     version: &'static str,
+    instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::logs::LoggerProvider> {
-    use opentelemetry_semantic_conventions::resource::{SERVICE_NAME, SERVICE_VERSION};
+    use opentelemetry_semantic_conventions::resource::{
+        SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_VERSION,
+    };
 
     opentelemetry_otlp::new_pipeline()
         .logging()
         .with_resource(opentelemetry_sdk::Resource::new([
             opentelemetry::KeyValue::new(SERVICE_NAME, name),
             opentelemetry::KeyValue::new(SERVICE_VERSION, version),
+            opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
         ]))
         .with_exporter(exporter(otel_endpoint))
         .install_batch(opentelemetry_sdk::runtime::Tokio)
@@ -65,8 +70,11 @@ fn meter(
     otel_endpoint: &str,
     name: &'static str,
     version: &'static str,
+    instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::metrics::SdkMeterProvider> {
-    use opentelemetry_semantic_conventions::resource::{SERVICE_NAME, SERVICE_NAMESPACE};
+    use opentelemetry_semantic_conventions::resource::{
+        SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_NAMESPACE,
+    };
 
     opentelemetry_otlp::new_pipeline()
         .metrics(opentelemetry_sdk::runtime::Tokio)
@@ -76,6 +84,7 @@ fn meter(
         .with_resource(opentelemetry_sdk::Resource::new([
             opentelemetry::KeyValue::new(SERVICE_NAMESPACE, name),
             opentelemetry::KeyValue::new(SERVICE_NAME, version),
+            opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
         ]))
         .build()
         .context("could not build metrics pipeline")
@@ -85,8 +94,11 @@ fn tracer(
     otel_endpoint: &str,
     name: &'static str,
     version: &'static str,
+    instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::trace::TracerProvider> {
-    use opentelemetry_semantic_conventions::resource::{SERVICE_NAME, SERVICE_VERSION};
+    use opentelemetry_semantic_conventions::resource::{
+        SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_VERSION,
+    };
 
     opentelemetry_otlp::new_pipeline()
         .tracing()
@@ -95,6 +107,7 @@ fn tracer(
             opentelemetry_sdk::Resource::new([
                 opentelemetry::KeyValue::new(SERVICE_NAME, name),
                 opentelemetry::KeyValue::new(SERVICE_VERSION, version),
+                opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
             ]),
         ))
         .install_batch(opentelemetry_sdk::runtime::Tokio)
