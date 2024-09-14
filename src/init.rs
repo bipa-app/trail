@@ -1,5 +1,3 @@
-use anyhow::Context;
-
 #[allow(dead_code)] // Someone has to hold the guard oras
 pub struct Handle(sentry::ClientInitGuard);
 
@@ -17,6 +15,7 @@ pub fn init(
     sentry_dsn: &str,
     rust_log: &str,
 ) -> anyhow::Result<Handle> {
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
     use tracing_subscriber::layer::SubscriberExt;
 
     let registry = tracing_subscriber::Registry::default()
@@ -38,6 +37,7 @@ pub fn init(
         opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider),
     ))?;
 
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     opentelemetry::global::set_tracer_provider(tracer_provider);
     opentelemetry::global::set_meter_provider(meter_provider);
 
@@ -50,6 +50,7 @@ fn logger(
     version: &'static str,
     instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::logs::LoggerProvider> {
+    use anyhow::Context;
     use opentelemetry_semantic_conventions::resource::{
         SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_VERSION,
     };
@@ -72,6 +73,7 @@ fn meter(
     version: &'static str,
     instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::metrics::SdkMeterProvider> {
+    use anyhow::Context;
     use opentelemetry_semantic_conventions::resource::{
         SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_NAMESPACE,
     };
@@ -96,6 +98,7 @@ fn tracer(
     version: &'static str,
     instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::trace::TracerProvider> {
+    use anyhow::Context;
     use opentelemetry_semantic_conventions::resource::{
         SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_VERSION,
     };
