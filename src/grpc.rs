@@ -1,14 +1,11 @@
-pub fn trace_injector() -> TraceInjector {
-    TraceInjector(opentelemetry_contrib::trace::propagator::trace_context_response::TraceContextResponsePropagator::new())
-}
-
 #[derive(Clone)]
-pub struct TraceInjector(opentelemetry_contrib::trace::propagator::trace_context_response::TraceContextResponsePropagator);
+pub struct TraceInjector;
 
 impl tonic::service::Interceptor for TraceInjector {
     fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
-        use opentelemetry::propagation::text_map_propagator::TextMapPropagator;
-        self.0.inject(&mut MetadataInjector(req.metadata_mut()));
+        opentelemetry::global::get_text_map_propagator(|p| {
+            p.inject(&mut MetadataInjector(req.metadata_mut()))
+        });
         Ok(req)
     }
 }
@@ -28,19 +25,11 @@ impl opentelemetry::propagation::Injector for MetadataInjector<'_> {
 
 pub fn trace_extractor<Svc>() -> impl Clone + tower_layer::Layer<Svc, Service = TraceExtractor<Svc>>
 {
-    let propagator = opentelemetry_contrib::trace::propagator::trace_context_response::TraceContextResponsePropagator::new();
-
-    tower_layer::layer_fn(move |svc| TraceExtractor {
-        propagator: propagator.clone(),
-        svc,
-    })
+    tower_layer::layer_fn(TraceExtractor)
 }
 
 #[derive(Clone)]
-pub struct TraceExtractor<Svc> {
-    propagator: opentelemetry_contrib::trace::propagator::trace_context_response::TraceContextResponsePropagator,
-    svc: Svc,
-}
+pub struct TraceExtractor<Svc>(Svc);
 
 impl<B, S> tower_service::Service<http::Request<B>> for TraceExtractor<S>
 where
@@ -54,15 +43,17 @@ where
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        self.svc.poll_ready(cx)
+        self.0.poll_ready(cx)
     }
 
     fn call(&mut self, req: http::Request<B>) -> Self::Future {
-        use opentelemetry::propagation::text_map_propagator::TextMapPropagator;
         use opentelemetry::trace::FutureExt;
 
-        let context = self.propagator.extract(&HeadersExtractor(req.headers()));
-        self.svc.call(req).with_context(context)
+        let context = opentelemetry::global::get_text_map_propagator(|p| {
+            p.extract(&HeadersExtractor(req.headers()))
+        });
+
+        self.0.call(req).with_context(context)
     }
 }
 
