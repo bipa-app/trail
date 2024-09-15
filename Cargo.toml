@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-opentelemetry = { version = "0.24.0", default-features = false }
+opentelemetry = { version = "0.24.0", features = ["trace"], default-features = false }
 
 anyhow = { version = "1.0.86", features = ["std"], default-features = false, optional = true }
 env_logger = { version = "0.11.5", features = ["auto-color", "humantime", "unstable-kv"], default-features = false, optional = true }
@@ -13,7 +13,6 @@ http = { version = "1.1.0", default-features = false, optional = true }
 log = { version = "0.4.22", features = ["kv_std"], default-features = false, optional = true }
 opentelemetry-appender-log = { version = "0.5.0", default-features = false, optional = true }
 opentelemetry-appender-tracing = { version = "0.5.0", default-features = false, optional = true }
-opentelemetry-contrib = { version = "0.16.0", default-features = false, optional = true }
 opentelemetry-otlp = { version = "0.17.0", features = ["grpc-tonic", "logs", "metrics", "trace"], default-features = false, optional = true }
 opentelemetry-semantic-conventions = { version = "0.16.0", default-features = false, optional = true }
 opentelemetry_sdk = { version = "0.24.1", features = ["rt-tokio", "trace"], default-features = false, optional = true }
@@ -46,7 +45,6 @@ init = [
 
 grpc = [
     "http",
-    "opentelemetry-contrib",
     "tonic",
     "tower-layer",
     "tower-service"
