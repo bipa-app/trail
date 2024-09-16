@@ -1,4 +1,4 @@
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct TraceInjector;
 
 impl tonic::service::Interceptor for TraceInjector {
