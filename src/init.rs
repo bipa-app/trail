@@ -27,7 +27,11 @@ pub fn init(
     let tracer_provider = tracer(otel_endpoint, name, version, instance)?;
     let meter_provider = meter(otel_endpoint, name, version, instance)?;
 
-    let env_logger = env_logger::Builder::new().parse_filters(rust_log).build();
+    let env_logger = env_logger::Builder::new()
+        .write_style(env_logger::fmt::WriteStyle::Always)
+        .parse_filters(rust_log)
+        .build();
+
     let otel_logger = opentelemetry_appender_log::OpenTelemetryLogBridge::new(&logger_provider);
 
     log::set_max_level(env_logger.filter());
