@@ -1,3 +1,6 @@
+#[cfg(feature = "amqp")]
+pub mod amqp;
+
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
