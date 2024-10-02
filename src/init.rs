@@ -117,6 +117,13 @@ fn tracer(
                 opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
             ]),
         ))
+        .with_batch_config(
+            opentelemetry_sdk::trace::BatchConfigBuilder::default()
+                .with_max_queue_size(4096)
+                .with_max_export_batch_size(1024)
+                .with_scheduled_delay(std::time::Duration::from_millis(1000))
+                .build(),
+        )
         .install_batch(opentelemetry_sdk::runtime::Tokio)
         .context("could not build tracing pipeline")
 }
@@ -126,6 +133,7 @@ fn exporter(endpoint: &str) -> opentelemetry_otlp::TonicExporterBuilder {
     opentelemetry_otlp::new_exporter()
         .tonic()
         .with_endpoint(endpoint)
+        .with_compression(opentelemetry_otlp::Compression::Zstd)
 }
 
 fn sentry<S>(
