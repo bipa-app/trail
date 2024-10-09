@@ -9,7 +9,7 @@ opentelemetry = { version = "0.26.0", features = ["logs", "metrics", "trace"], d
 
 anyhow = { version = "1.0.86", features = ["std"], default-features = false, optional = true }
 env_logger = { version = "0.11.5", features = ["auto-color", "humantime", "unstable-kv"], default-features = false, optional = true }
-fe2o3-amqp-types = { version = "0.12.0", features = ["primitive", "messaging"], default-features = false, optional = true }
+fe2o3-amqp-types = { version = "0.13.0", features = ["primitive", "messaging"], default-features = false, optional = true }
 http = { version = "1.1.0", default-features = false, optional = true }
 log = { version = "0.4.22", features = ["kv_std"], default-features = false, optional = true }
 opentelemetry-appender-log = { version = "0.26.0", default-features = false, optional = true }
