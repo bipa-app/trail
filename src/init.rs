@@ -54,21 +54,25 @@ fn logger(
     version: &'static str,
     instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::logs::LoggerProvider> {
-    use anyhow::Context;
+    use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
     use opentelemetry_semantic_conventions::resource::{
         SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_VERSION,
     };
 
-    opentelemetry_otlp::new_pipeline()
-        .logging()
+    let exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(otel_endpoint)
+        .with_compression(opentelemetry_otlp::Compression::Zstd)
+        .build()?;
+
+    Ok(opentelemetry_sdk::logs::LoggerProvider::builder()
         .with_resource(opentelemetry_sdk::Resource::new([
             opentelemetry::KeyValue::new(SERVICE_NAME, name),
             opentelemetry::KeyValue::new(SERVICE_VERSION, version),
             opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
         ]))
-        .with_exporter(exporter(otel_endpoint))
-        .install_batch(opentelemetry_sdk::runtime::Tokio)
-        .context("could not build logs pipeline")
+        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+        .build())
 }
 
 fn meter(
@@ -77,23 +81,33 @@ fn meter(
     version: &'static str,
     instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::metrics::SdkMeterProvider> {
-    use anyhow::Context;
+    use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
     use opentelemetry_semantic_conventions::resource::{
         SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_NAMESPACE,
     };
 
-    opentelemetry_otlp::new_pipeline()
-        .metrics(opentelemetry_sdk::runtime::Tokio)
-        .with_exporter(exporter(otel_endpoint))
-        .with_period(std::time::Duration::from_secs(20))
-        .with_timeout(std::time::Duration::from_secs(10))
+    let exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(otel_endpoint)
+        .with_compression(opentelemetry_otlp::Compression::Zstd)
+        .build()?;
+
+    let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(
+        exporter,
+        opentelemetry_sdk::runtime::Tokio,
+    )
+    .with_interval(std::time::Duration::from_secs(20))
+    .with_timeout(std::time::Duration::from_secs(10))
+    .build();
+
+    Ok(opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_reader(reader)
         .with_resource(opentelemetry_sdk::Resource::new([
             opentelemetry::KeyValue::new(SERVICE_NAMESPACE, name),
             opentelemetry::KeyValue::new(SERVICE_NAME, version),
             opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
         ]))
-        .build()
-        .context("could not build metrics pipeline")
+        .build())
 }
 
 fn tracer(
@@ -102,31 +116,27 @@ fn tracer(
     version: &'static str,
     instance: &str,
 ) -> anyhow::Result<opentelemetry_sdk::trace::TracerProvider> {
-    use anyhow::Context;
+    use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
     use opentelemetry_semantic_conventions::resource::{
         SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_VERSION,
     };
 
-    opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(exporter(otel_endpoint))
-        .with_trace_config(opentelemetry_sdk::trace::Config::default().with_resource(
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(otel_endpoint)
+        .with_compression(opentelemetry_otlp::Compression::Zstd)
+        .build()?;
+
+    Ok(opentelemetry_sdk::trace::TracerProvider::builder()
+        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+        .with_config(opentelemetry_sdk::trace::Config::default().with_resource(
             opentelemetry_sdk::Resource::new([
                 opentelemetry::KeyValue::new(SERVICE_NAME, name),
                 opentelemetry::KeyValue::new(SERVICE_VERSION, version),
                 opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
             ]),
         ))
-        .install_batch(opentelemetry_sdk::runtime::Tokio)
-        .context("could not build tracing pipeline")
-}
-
-fn exporter(endpoint: &str) -> opentelemetry_otlp::TonicExporterBuilder {
-    use opentelemetry_otlp::WithExportConfig;
-    opentelemetry_otlp::new_exporter()
-        .tonic()
-        .with_endpoint(endpoint)
-        .with_compression(opentelemetry_otlp::Compression::Zstd)
+        .build())
 }
 
 fn sentry<S>(
