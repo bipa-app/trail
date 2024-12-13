@@ -13,18 +13,14 @@ fe2o3-amqp-types = { version = "0.13.0", features = ["primitive", "messaging"], 
 http = { version = "1.1.0", default-features = false, optional = true }
 log = { version = "0.4.22", features = ["kv_std"], default-features = false, optional = true }
 opentelemetry-appender-log = { version = "0.27.0", default-features = false, optional = true }
-opentelemetry-appender-tracing = { version = "0.27.0", default-features = false, optional = true }
 opentelemetry-otlp = { version = "0.27.0", features = ["grpc-tonic", "zstd-tonic", "logs", "metrics", "trace"], default-features = false, optional = true }
 opentelemetry-semantic-conventions = { version = "0.27.0", features = ["semconv_experimental"], default-features = false, optional = true }
 opentelemetry_sdk = { version = "0.27.0", features = ["rt-tokio", "trace"], default-features = false, optional = true }
 sentry = { version = "0.34.0", features = ["panic", "reqwest", "rustls"], default-features = false, optional = true }
 sentry-log = { version = "0.34.0", default-features = false, optional = true }
-sentry-tracing = { version = "0.34.0", default-features = false, optional = true }
 tonic = { version = "0.12.1", default-features = false, optional = true }
 tower-layer = { version = "0.3.3", default-features = false, optional = true }
 tower-service = { version = "0.3.3", default-features = false, optional = true }
-tracing = { version = "0.1.40", default-features = false, optional = true }
-tracing-subscriber = { version = "0.3.18", features = ["ansi", "env-filter", "fmt"], default-features = false, optional = true }
 
 [features]
 
@@ -33,15 +29,11 @@ init = [
     "env_logger",
     "log",
     "opentelemetry-appender-log",
-    "opentelemetry-appender-tracing",
     "opentelemetry-otlp",
     "opentelemetry-semantic-conventions",
     "opentelemetry_sdk",
     "sentry",
-    "sentry-log",
-    "sentry-tracing",
-    "tracing",
-    "tracing-subscriber"
+    "sentry-log"
 ]
 
 amqp = ["fe2o3-amqp-types"]

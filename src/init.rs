@@ -16,13 +16,8 @@ pub fn init(
     rust_log: &str,
 ) -> anyhow::Result<Handle> {
     use opentelemetry_sdk::propagation::TraceContextPropagator;
-    use tracing_subscriber::layer::SubscriberExt;
 
-    let registry = tracing_subscriber::Registry::default()
-        .with(tracing_subscriber::EnvFilter::new(rust_log))
-        .with(tracing_subscriber::fmt::Layer::default().compact());
-
-    let (guard, sentry_layer, sentry_logger) = sentry(sentry_dsn, version);
+    let (guard, sentry_logger) = sentry(sentry_dsn, version);
     let logger_provider = logger(otel_endpoint, name, version, instance)?;
     let tracer_provider = tracer(otel_endpoint, name, version, instance)?;
     let meter_provider = meter(otel_endpoint, name, version, instance)?;
@@ -36,10 +31,6 @@ pub fn init(
 
     log::set_max_level(env_logger.filter());
     log::set_boxed_logger(Box::new(Logger(env_logger, sentry_logger, otel_logger)))?;
-
-    tracing::subscriber::set_global_default(registry.with(sentry_layer).with(
-        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider),
-    ))?;
 
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     opentelemetry::global::set_tracer_provider(tracer_provider);
@@ -129,27 +120,21 @@ fn tracer(
 
     Ok(opentelemetry_sdk::trace::TracerProvider::builder()
         .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_config(opentelemetry_sdk::trace::Config::default().with_resource(
-            opentelemetry_sdk::Resource::new([
-                opentelemetry::KeyValue::new(SERVICE_NAME, name),
-                opentelemetry::KeyValue::new(SERVICE_VERSION, version),
-                opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
-            ]),
-        ))
+        .with_resource(opentelemetry_sdk::Resource::new([
+            opentelemetry::KeyValue::new(SERVICE_NAME, name),
+            opentelemetry::KeyValue::new(SERVICE_VERSION, version),
+            opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
+        ]))
         .build())
 }
 
-fn sentry<S>(
+fn sentry(
     dsn: &str,
     version: &str,
 ) -> (
     sentry::ClientInitGuard,
-    sentry_tracing::SentryLayer<S>,
     sentry_log::SentryLogger<sentry_log::NoopLogger>,
-)
-where
-    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
-{
+) {
     let sentry = sentry::init((
         dsn.to_string(),
         sentry::ClientOptions {
@@ -160,11 +145,7 @@ where
         .add_integration(SentryOtel),
     ));
 
-    (
-        sentry,
-        sentry_tracing::layer(),
-        sentry_log::SentryLogger::new(),
-    )
+    (sentry, sentry_log::SentryLogger::new())
 }
 
 struct Logger<P, L>(
