@@ -1,9 +1,14 @@
 #[allow(dead_code)] // Someone has to hold the guard oras
-pub struct Handle(sentry::ClientInitGuard);
+pub struct Handle {
+    sentry: sentry::ClientInitGuard,
+    tracer_provider: opentelemetry_sdk::trace::SdkTracerProvider,
+}
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        opentelemetry::global::shutdown_tracer_provider();
+        if let Err(e) = self.tracer_provider.shutdown() {
+            log::error!(e:?; "tracer provider shutdown failed");
+        }
     }
 }
 
@@ -17,7 +22,7 @@ pub fn init(
 ) -> anyhow::Result<Handle> {
     use opentelemetry_sdk::propagation::TraceContextPropagator;
 
-    let (guard, sentry_logger) = sentry(sentry_dsn, version);
+    let (sentry, sentry_logger) = sentry(sentry_dsn, version);
     let logger_provider = logger(otel_endpoint, name, version, instance)?;
     let tracer_provider = tracer(otel_endpoint, name, version, instance)?;
     let meter_provider = meter(otel_endpoint, name, version, instance)?;
@@ -33,10 +38,13 @@ pub fn init(
     log::set_boxed_logger(Box::new(Logger(env_logger, sentry_logger, otel_logger)))?;
 
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-    opentelemetry::global::set_tracer_provider(tracer_provider);
+    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
     opentelemetry::global::set_meter_provider(meter_provider);
 
-    Ok(Handle(guard))
+    Ok(Handle {
+        sentry,
+        tracer_provider,
+    })
 }
 
 fn logger(
@@ -44,7 +52,7 @@ fn logger(
     name: &'static str,
     version: &'static str,
     instance: &str,
-) -> anyhow::Result<opentelemetry_sdk::logs::LoggerProvider> {
+) -> anyhow::Result<opentelemetry_sdk::logs::SdkLoggerProvider> {
     use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
     use opentelemetry_semantic_conventions::resource::{
         SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_VERSION,
@@ -56,13 +64,17 @@ fn logger(
         .with_compression(opentelemetry_otlp::Compression::Zstd)
         .build()?;
 
-    Ok(opentelemetry_sdk::logs::LoggerProvider::builder()
-        .with_resource(opentelemetry_sdk::Resource::new([
-            opentelemetry::KeyValue::new(SERVICE_NAME, name),
-            opentelemetry::KeyValue::new(SERVICE_VERSION, version),
-            opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
-        ]))
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+    Ok(opentelemetry_sdk::logs::SdkLoggerProvider::builder()
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_attributes([
+                    opentelemetry::KeyValue::new(SERVICE_NAME, name),
+                    opentelemetry::KeyValue::new(SERVICE_VERSION, version),
+                    opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
+                ])
+                .build(),
+        )
+        .with_batch_exporter(exporter)
         .build())
 }
 
@@ -83,21 +95,21 @@ fn meter(
         .with_compression(opentelemetry_otlp::Compression::Zstd)
         .build()?;
 
-    let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(
-        exporter,
-        opentelemetry_sdk::runtime::Tokio,
-    )
-    .with_interval(std::time::Duration::from_secs(20))
-    .with_timeout(std::time::Duration::from_secs(10))
-    .build();
+    let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter)
+        .with_interval(std::time::Duration::from_secs(20))
+        .build();
 
     Ok(opentelemetry_sdk::metrics::SdkMeterProvider::builder()
         .with_reader(reader)
-        .with_resource(opentelemetry_sdk::Resource::new([
-            opentelemetry::KeyValue::new(SERVICE_NAMESPACE, name),
-            opentelemetry::KeyValue::new(SERVICE_NAME, version),
-            opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
-        ]))
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_attributes([
+                    opentelemetry::KeyValue::new(SERVICE_NAMESPACE, name),
+                    opentelemetry::KeyValue::new(SERVICE_NAME, version),
+                    opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
+                ])
+                .build(),
+        )
         .build())
 }
 
@@ -106,7 +118,7 @@ fn tracer(
     name: &'static str,
     version: &'static str,
     instance: &str,
-) -> anyhow::Result<opentelemetry_sdk::trace::TracerProvider> {
+) -> anyhow::Result<opentelemetry_sdk::trace::SdkTracerProvider> {
     use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
     use opentelemetry_semantic_conventions::resource::{
         SERVICE_INSTANCE_ID, SERVICE_NAME, SERVICE_VERSION,
@@ -118,13 +130,17 @@ fn tracer(
         .with_compression(opentelemetry_otlp::Compression::Zstd)
         .build()?;
 
-    Ok(opentelemetry_sdk::trace::TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-        .with_resource(opentelemetry_sdk::Resource::new([
-            opentelemetry::KeyValue::new(SERVICE_NAME, name),
-            opentelemetry::KeyValue::new(SERVICE_VERSION, version),
-            opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
-        ]))
+    Ok(opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_attributes([
+                    opentelemetry::KeyValue::new(SERVICE_NAME, name),
+                    opentelemetry::KeyValue::new(SERVICE_VERSION, version),
+                    opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
+                ])
+                .build(),
+        )
         .build())
 }
 
