@@ -2,13 +2,27 @@
 pub struct Handle {
     sentry: sentry::ClientInitGuard,
     tracer_provider: opentelemetry_sdk::trace::SdkTracerProvider,
+    logger_provider: opentelemetry_sdk::logs::SdkLoggerProvider,
+    meter_provider: opentelemetry_sdk::metrics::SdkMeterProvider,
+}
+
+impl Handle {
+    pub fn shutdown(&self) {
+        if let Err(e) = self.logger_provider.shutdown() {
+            eprintln!("Error during logger shutdown: {:?}", e);
+        }
+        if let Err(e) = self.tracer_provider.shutdown() {
+            eprintln!("Error during tracer shutdown: {:?}", e);
+        }
+        if let Err(e) = self.meter_provider.shutdown() {
+            eprintln!("Error during meter shutdown: {:?}", e);
+        }
+    }
 }
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        if let Err(e) = self.tracer_provider.shutdown() {
-            log::error!(e:?; "tracer provider shutdown failed");
-        }
+        self.shutdown();
     }
 }
 
@@ -39,11 +53,13 @@ pub fn init(
 
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
-    opentelemetry::global::set_meter_provider(meter_provider);
+    opentelemetry::global::set_meter_provider(meter_provider.clone());
 
     Ok(Handle {
         sentry,
         tracer_provider,
+        logger_provider,
+        meter_provider,
     })
 }
 
@@ -190,7 +206,9 @@ where
 
     fn flush(&self) {
         self.0.flush();
-        self.1.flush();
+        // this fn apparently is never called
+        // but when we do, it breaks an unimplemented! error in sentry
+        // self.1.flush();
         self.2.flush();
     }
 }
