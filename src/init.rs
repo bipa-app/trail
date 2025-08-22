@@ -77,7 +77,7 @@ fn logger(
     let exporter = opentelemetry_otlp::LogExporter::builder()
         .with_tonic()
         .with_endpoint(otel_endpoint)
-        .with_compression(opentelemetry_otlp::Compression::Zstd)
+        .with_compression(opentelemetry_otlp::Compression::Gzip)
         .build()?;
 
     Ok(opentelemetry_sdk::logs::SdkLoggerProvider::builder()
@@ -108,7 +108,7 @@ fn meter(
     let exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
         .with_endpoint(otel_endpoint)
-        .with_compression(opentelemetry_otlp::Compression::Zstd)
+        .with_compression(opentelemetry_otlp::Compression::Gzip)
         .build()?;
 
     let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter)
@@ -143,7 +143,7 @@ fn tracer(
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(otel_endpoint)
-        .with_compression(opentelemetry_otlp::Compression::Zstd)
+        .with_compression(opentelemetry_otlp::Compression::Gzip)
         .build()?;
 
     Ok(opentelemetry_sdk::trace::SdkTracerProvider::builder()
