@@ -199,9 +199,11 @@ where
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        self.0.log(record);
-        self.1.log(record);
-        self.2.log(record);
+        if self.0.enabled(record.metadata()) {
+            self.0.log(record);
+            self.1.log(record);
+            self.2.log(record);
+        }
     }
 
     fn flush(&self) {

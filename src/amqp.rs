@@ -3,9 +3,7 @@ pub fn export_trace<B>(
     m: &mut fe2o3_amqp_types::messaging::message::Message<B>,
 ) {
     opentelemetry::global::get_text_map_propagator(|p| {
-        let annotations = m
-            .message_annotations
-            .get_or_insert_with(|| Default::default());
+        let annotations = m.message_annotations.get_or_insert_with(Default::default);
 
         p.inject_context(ctx, &mut AnnotationsInjector(annotations))
     });
