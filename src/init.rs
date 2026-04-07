@@ -34,11 +34,37 @@ pub fn init(
     sentry_dsn: &str,
     rust_log: &str,
 ) -> anyhow::Result<Handle> {
-    use opentelemetry_sdk::propagation::TraceContextPropagator;
+    init_with_baggage(
+        name,
+        version,
+        instance,
+        otel_endpoint,
+        sentry_dsn,
+        rust_log,
+        [],
+    )
+}
+
+pub fn init_with_baggage(
+    name: &'static str,
+    version: &'static str,
+    instance: &str,
+    otel_endpoint: &str,
+    sentry_dsn: &str,
+    rust_log: &str,
+    baggage_allowlist: impl IntoIterator<Item = opentelemetry::Key>,
+) -> anyhow::Result<Handle> {
+    let baggage_allowlist = baggage_allowlist.into_iter().collect::<Vec<_>>();
 
     let (sentry, sentry_logger) = sentry(sentry_dsn, version);
     let logger_provider = logger(otel_endpoint, name, version, instance)?;
-    let tracer_provider = tracer(otel_endpoint, name, version, instance)?;
+    let tracer_provider = tracer(
+        otel_endpoint,
+        name,
+        version,
+        instance,
+        baggage_allowlist.clone(),
+    )?;
     let meter_provider = meter(otel_endpoint, name, version, instance)?;
 
     let env_logger = env_logger::Builder::new()
@@ -51,7 +77,9 @@ pub fn init(
     log::set_max_level(env_logger.filter());
     log::set_boxed_logger(Box::new(Logger(env_logger, sentry_logger, otel_logger)))?;
 
-    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+    opentelemetry::global::set_text_map_propagator(text_map_propagator(
+        !baggage_allowlist.is_empty(),
+    ));
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
@@ -61,6 +89,20 @@ pub fn init(
         logger_provider,
         meter_provider,
     })
+}
+
+fn text_map_propagator(
+    include_baggage: bool,
+) -> opentelemetry::propagation::TextMapCompositePropagator {
+    use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
+
+    let mut propagators: Vec<Box<dyn opentelemetry::propagation::TextMapPropagator + Send + Sync>> =
+        vec![Box::new(TraceContextPropagator::new())];
+    if include_baggage {
+        propagators.insert(0, Box::new(BaggagePropagator::new()));
+    }
+
+    opentelemetry::propagation::TextMapCompositePropagator::new(propagators)
 }
 
 fn logger(
@@ -86,7 +128,7 @@ fn logger(
                 .with_attributes([
                     opentelemetry::KeyValue::new(SERVICE_NAME, name),
                     opentelemetry::KeyValue::new(SERVICE_VERSION, version),
-                    opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
+                    opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_owned()),
                 ])
                 .build(),
         )
@@ -122,7 +164,7 @@ fn meter(
                 .with_attributes([
                     opentelemetry::KeyValue::new(SERVICE_NAMESPACE, name),
                     opentelemetry::KeyValue::new(SERVICE_NAME, version),
-                    opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
+                    opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_owned()),
                 ])
                 .build(),
         )
@@ -134,6 +176,7 @@ fn tracer(
     name: &'static str,
     version: &'static str,
     instance: &str,
+    baggage_allowlist: impl IntoIterator<Item = opentelemetry::Key>,
 ) -> anyhow::Result<opentelemetry_sdk::trace::SdkTracerProvider> {
     use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
     use opentelemetry_semantic_conventions::resource::{
@@ -146,18 +189,25 @@ fn tracer(
         .with_compression(opentelemetry_otlp::Compression::Gzip)
         .build()?;
 
-    Ok(opentelemetry_sdk::trace::SdkTracerProvider::builder()
+    let mut builder = opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
         .with_resource(
             opentelemetry_sdk::Resource::builder()
                 .with_attributes([
                     opentelemetry::KeyValue::new(SERVICE_NAME, name),
                     opentelemetry::KeyValue::new(SERVICE_VERSION, version),
-                    opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_string()),
+                    opentelemetry::KeyValue::new(SERVICE_INSTANCE_ID, instance.to_owned()),
                 ])
                 .build(),
-        )
-        .build())
+        );
+
+    let allowed: std::collections::HashSet<opentelemetry::Key> =
+        baggage_allowlist.into_iter().collect();
+    if !allowed.is_empty() {
+        builder = builder.with_span_processor(crate::BaggageSpanProcessor::new(allowed));
+    }
+
+    Ok(builder.build())
 }
 
 fn sentry(
@@ -168,7 +218,7 @@ fn sentry(
     sentry_log::SentryLogger<sentry_log::NoopLogger>,
 ) {
     let sentry = sentry::init((
-        dsn.to_string(),
+        dsn.to_owned(),
         sentry::ClientOptions {
             release: Some(std::borrow::Cow::Owned(String::from(version))),
             ..Default::default()
@@ -234,5 +284,29 @@ impl sentry::Integration for SentryOtel {
         );
 
         Some(event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::text_map_propagator;
+    use opentelemetry::propagation::TextMapPropagator as _;
+
+    #[test]
+    fn text_map_propagator_includes_baggage_when_enabled() {
+        let propagator = text_map_propagator(true);
+        let fields = propagator.fields().collect::<Vec<_>>();
+
+        assert!(fields.contains(&"traceparent"));
+        assert!(fields.contains(&"baggage"));
+    }
+
+    #[test]
+    fn text_map_propagator_omits_baggage_when_disabled() {
+        let propagator = text_map_propagator(false);
+        let fields = propagator.fields().collect::<Vec<_>>();
+
+        assert!(fields.contains(&"traceparent"));
+        assert!(!fields.contains(&"baggage"));
     }
 }
