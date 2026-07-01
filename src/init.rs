@@ -228,25 +228,30 @@ fn tracer(
 // so it composes with Sentry's PanicIntegration while Sentry is enabled, and
 // falls back to the default hook once Sentry is dropped.
 fn install_panic_logger() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let location = info.location().map(|l| l.to_string()).unwrap_or_default();
-        let message = info
-            .payload()
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("<non-string panic payload>");
-        let backtrace = std::backtrace::Backtrace::capture().to_string();
-        log::error!(
-            target: "panic",
-            kind = "panic",
-            panic_location = location.as_str(),
-            backtrace = backtrace.as_str();
-            "panic: {message}"
-        );
-        previous(info);
-    }));
+    // Install exactly once so repeated init calls don't stack panic hooks.
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info.location().map(|l| l.to_string()).unwrap_or_default();
+            let message = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic payload>");
+            // force_capture: panic diagnostics must not depend on RUST_BACKTRACE being set.
+            let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+            log::error!(
+                target: "panic",
+                kind = "panic",
+                panic_location = location.as_str(),
+                backtrace = backtrace.as_str();
+                "panic: {message}"
+            );
+            previous(info);
+        }));
+    });
 }
 
 #[cfg(feature = "sentry")]
@@ -294,10 +299,17 @@ where
     }
 
     fn log(&self, record: &log::Record<'_>) {
+        // Forward to each sink on its own filter: env_logger's per-target RUST_LOG
+        // must not gate the OTLP/Loki export, or panic/error records whose target
+        // isn't in RUST_LOG (e.g. target "panic") would be dropped before Loki.
         if self.env.enabled(record.metadata()) {
             self.env.log(record);
-            #[cfg(feature = "sentry")]
+        }
+        #[cfg(feature = "sentry")]
+        if self.sentry.enabled(record.metadata()) {
             self.sentry.log(record);
+        }
+        if self.otel.enabled(record.metadata()) {
             self.otel.log(record);
         }
     }
