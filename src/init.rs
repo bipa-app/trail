@@ -223,6 +223,10 @@ fn tracer(
     Ok(builder.build())
 }
 
+// Log target for the native panic hook. `Logger::log` keys off it to keep the
+// panic out of the Sentry sink (Sentry's PanicIntegration already captures it).
+const PANIC_TARGET: &str = "panic";
+
 // Native panic capture, independent of Sentry: a global hook that routes panics
 // through `log` (and thus to Loki via the OTLP bridge). Chains the previous hook
 // so it composes with Sentry's PanicIntegration while Sentry is enabled, and
@@ -243,7 +247,7 @@ fn install_panic_logger() {
             // force_capture: panic diagnostics must not depend on RUST_BACKTRACE being set.
             let backtrace = std::backtrace::Backtrace::force_capture().to_string();
             log::error!(
-                target: "panic",
+                target: PANIC_TARGET,
                 kind = "panic",
                 panic_location = location.as_str(),
                 backtrace = backtrace.as_str();
@@ -305,8 +309,11 @@ where
         if self.env.enabled(record.metadata()) {
             self.env.log(record);
         }
+        // Panics reach Sentry through the chained PanicIntegration hook (with a
+        // real backtrace); re-capturing the "panic" log record here would emit a
+        // second, lower-fidelity Sentry event per panic. Loki/stderr still get it.
         #[cfg(feature = "sentry")]
-        if self.sentry.enabled(record.metadata()) {
+        if record.target() != PANIC_TARGET && self.sentry.enabled(record.metadata()) {
             self.sentry.log(record);
         }
         if self.otel.enabled(record.metadata()) {
