@@ -1,5 +1,6 @@
 #[allow(dead_code)] // Someone has to hold the guard oras
 pub struct Handle {
+    #[cfg(feature = "sentry")]
     sentry: sentry::ClientInitGuard,
     tracer_provider: opentelemetry_sdk::trace::SdkTracerProvider,
     logger_provider: opentelemetry_sdk::logs::SdkLoggerProvider,
@@ -56,7 +57,11 @@ pub fn init_with_baggage(
 ) -> anyhow::Result<Handle> {
     let baggage_allowlist = baggage_allowlist.into_iter().collect::<Vec<_>>();
 
+    #[cfg(feature = "sentry")]
     let (sentry, sentry_logger) = sentry(sentry_dsn, version);
+    #[cfg(not(feature = "sentry"))]
+    let _ = sentry_dsn;
+
     let logger_provider = logger(otel_endpoint, name, version, instance)?;
     let tracer_provider = tracer(
         otel_endpoint,
@@ -75,7 +80,14 @@ pub fn init_with_baggage(
     let otel_logger = opentelemetry_appender_log::OpenTelemetryLogBridge::new(&logger_provider);
 
     log::set_max_level(env_logger.filter());
-    log::set_boxed_logger(Box::new(Logger(env_logger, sentry_logger, otel_logger)))?;
+    log::set_boxed_logger(Box::new(Logger {
+        env: env_logger,
+        #[cfg(feature = "sentry")]
+        sentry: sentry_logger,
+        otel: otel_logger,
+    }))?;
+
+    install_panic_logger();
 
     opentelemetry::global::set_text_map_propagator(text_map_propagator(
         !baggage_allowlist.is_empty(),
@@ -84,6 +96,7 @@ pub fn init_with_baggage(
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
     Ok(Handle {
+        #[cfg(feature = "sentry")]
         sentry,
         tracer_provider,
         logger_provider,
@@ -210,6 +223,42 @@ fn tracer(
     Ok(builder.build())
 }
 
+// Log target for the native panic hook. `Logger::log` keys off it to keep the
+// panic out of the Sentry sink (Sentry's PanicIntegration already captures it).
+const PANIC_TARGET: &str = "panic";
+
+// Native panic capture, independent of Sentry: a global hook that routes panics
+// through `log` (and thus to Loki via the OTLP bridge). Chains the previous hook
+// so it composes with Sentry's PanicIntegration while Sentry is enabled, and
+// falls back to the default hook once Sentry is dropped.
+fn install_panic_logger() {
+    // Install exactly once so repeated init calls don't stack panic hooks.
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info.location().map(|l| l.to_string()).unwrap_or_default();
+            let message = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("<non-string panic payload>");
+            // force_capture: panic diagnostics must not depend on RUST_BACKTRACE being set.
+            let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+            log::error!(
+                target: PANIC_TARGET,
+                kind = "panic",
+                panic_location = location.as_str(),
+                backtrace = backtrace.as_str();
+                "panic: {message}"
+            );
+            previous(info);
+        }));
+    });
+}
+
+#[cfg(feature = "sentry")]
 fn sentry(
     dsn: &str,
     version: &str,
@@ -230,14 +279,16 @@ fn sentry(
     (sentry, sentry_log::SentryLogger::new())
 }
 
-struct Logger<P, L>(
-    env_logger::Logger,
-    sentry_log::SentryLogger<sentry_log::NoopLogger>,
-    opentelemetry_appender_log::OpenTelemetryLogBridge<P, L>,
-)
+struct Logger<P, L>
 where
     P: opentelemetry::logs::LoggerProvider<Logger = L> + Send + Sync,
-    L: opentelemetry::logs::Logger + Send + Sync;
+    L: opentelemetry::logs::Logger + Send + Sync,
+{
+    env: env_logger::Logger,
+    #[cfg(feature = "sentry")]
+    sentry: sentry_log::SentryLogger<sentry_log::NoopLogger>,
+    otel: opentelemetry_appender_log::OpenTelemetryLogBridge<P, L>,
+}
 
 impl<P, L> log::Log for Logger<P, L>
 where
@@ -245,27 +296,41 @@ where
     L: opentelemetry::logs::Logger + Send + Sync,
 {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        self.0.enabled(metadata) || self.1.enabled(metadata) || self.2.enabled(metadata)
+        let enabled = self.env.enabled(metadata) || self.otel.enabled(metadata);
+        #[cfg(feature = "sentry")]
+        let enabled = enabled || self.sentry.enabled(metadata);
+        enabled
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        if self.0.enabled(record.metadata()) {
-            self.0.log(record);
-            self.1.log(record);
-            self.2.log(record);
+        // Forward to each sink on its own filter: env_logger's per-target RUST_LOG
+        // must not gate the OTLP/Loki export, or panic/error records whose target
+        // isn't in RUST_LOG (e.g. target "panic") would be dropped before Loki.
+        if self.env.enabled(record.metadata()) {
+            self.env.log(record);
+        }
+        // Panics reach Sentry through the chained PanicIntegration hook (with a
+        // real backtrace); re-capturing the "panic" log record here would emit a
+        // second, lower-fidelity Sentry event per panic. Loki/stderr still get it.
+        #[cfg(feature = "sentry")]
+        if record.target() != PANIC_TARGET && self.sentry.enabled(record.metadata()) {
+            self.sentry.log(record);
+        }
+        if self.otel.enabled(record.metadata()) {
+            self.otel.log(record);
         }
     }
 
     fn flush(&self) {
-        self.0.flush();
-        // this fn apparently is never called
-        // but when we do, it breaks an unimplemented! error in sentry
-        // self.1.flush();
-        self.2.flush();
+        self.env.flush();
+        // sentry's logger flush hits an unimplemented! error, so it is skipped.
+        self.otel.flush();
     }
 }
 
+#[cfg(feature = "sentry")]
 struct SentryOtel;
+#[cfg(feature = "sentry")]
 impl sentry::Integration for SentryOtel {
     fn process_event(
         &self,

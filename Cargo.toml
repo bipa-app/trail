@@ -24,6 +24,8 @@ tower-service = { version = "0.3.3", default-features = false, optional = true }
 
 [features]
 
+default = ["sentry"]
+
 init = [
     "anyhow",
     "env_logger",
@@ -32,9 +34,12 @@ init = [
     "opentelemetry-otlp",
     "opentelemetry-semantic-conventions",
     "opentelemetry_sdk",
-    "sentry",
-    "sentry-log"
 ]
+
+# Sentry is optional, enabled by default for backwards compatibility. Disable it
+# with `default-features = false` to drop Sentry and its dependency tree; panic
+# capture continues via the native log-based hook installed by `init`.
+sentry = ["dep:sentry", "dep:sentry-log"]
 
 amqp = ["fe2o3-amqp-types"]
 
