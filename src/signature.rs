@@ -21,29 +21,33 @@ pub(crate) fn compute(record: &log::Record<'_>) -> Signature {
     let mut kv = Collected::default();
     let _ = record.key_values().visit(&mut kv);
 
+    // Native panic records carry the hook's panic_location kv; a user record
+    // that merely borrows the "panic" target falls through to the error path.
     if record.target() == crate::init::PANIC_TARGET {
-        let scope = kv
-            .panic_location
-            .as_deref()
-            .map(strip_line_col)
-            .unwrap_or_default()
-            .to_owned();
-        let msg = message_component(record);
-        return Signature {
-            fingerprint: fnv1a(&["panic", &scope, &msg]),
-            root: truncate_chars(&msg, 80).to_owned(),
-            scope,
-        };
+        if let Some(location) = kv.panic_location.as_deref() {
+            let scope = strip_line_col(location).to_owned();
+            let msg = message_component(record);
+            return Signature {
+                fingerprint: fnv1a(&["panic", &scope, &msg]),
+                root: truncate_chars(&msg, 80).to_owned(),
+                scope,
+            };
+        }
     }
 
     let scope = record.module_path().unwrap_or_default().to_owned();
     let msg = message_component(record);
     let chain = kv.chain.or(kv.chain_fallback);
     let (chain_component, root) = match chain.as_deref().map(strip_backtrace) {
-        Some(chain) => (
-            scrub(truncate_chars(chain, 4096)),
-            truncate_chars(&root_line(chain), 80).to_owned(),
-        ),
+        Some(chain) => {
+            // root must derive from the same capped slice the hash sees, or two
+            // chains equal up to the cap could share a fingerprint yet split on root.
+            let capped = truncate_chars(chain, 4096);
+            (
+                scrub(capped),
+                truncate_chars(&root_line(capped), 80).to_owned(),
+            )
+        }
         None => (String::new(), truncate_chars(&msg, 80).to_owned()),
     };
     Signature {
@@ -216,6 +220,8 @@ fn is_dynamic(token: &str) -> bool {
     digits == core.chars().count()
         || digits >= 6
         || (core.len() >= 8 && core.chars().all(|c| c.is_ascii_hexdigit()))
+        // long mixed alphanumerics are opaque blobs (base64, jwt segments, tokens)
+        || (core.len() >= 20 && digits >= 2)
 }
 
 fn is_uuid(token: &str) -> bool {
@@ -416,6 +422,30 @@ mod tests {
     }
 
     #[test]
+    fn user_record_borrowing_the_panic_target_takes_the_error_path() {
+        let mut sig = Signature::default();
+        with_record(
+            format_args!("manual panic-like error"),
+            crate::init::PANIC_TARGET,
+            "bipa::features::foo",
+            &[],
+            |record| sig = compute(record),
+        );
+        assert_eq!(sig.scope, "bipa::features::foo");
+        assert_eq!(sig.root, "manual panic-like error");
+    }
+
+    #[test]
+    fn root_and_fingerprint_agree_beyond_the_chain_cap() {
+        // chains identical up to the 4096 cap must share BOTH fingerprint and root
+        let long = format!("outer\n\nCaused by:\n    {}", "y".repeat(5000));
+        let a = turbo_signature(&format!("{long}\n    tail root one"));
+        let b = turbo_signature(&format!("{long}\n    tail root two"));
+        assert_eq!(a.fingerprint, b.fingerprint);
+        assert_eq!(a.root, b.root);
+    }
+
+    #[test]
     fn scrub_pins() {
         assert_eq!(scrub("user_id: 311396"), "user_id: #");
         assert_eq!(scrub("should have configs"), "should have configs");
@@ -431,6 +461,11 @@ mod tests {
         assert_eq!(scrub("at 2026-07-01T19:04:18.260"), "at #");
         assert_eq!(scrub("txid deadbeefcafe1234"), "txid #");
         assert_eq!(scrub("invoice lnbc2500u1pvjluezhash"), "invoice #");
+        assert_eq!(scrub("jwt eyJhbGciOiJIUzI1NiJ9 rejected"), "jwt # rejected");
+        assert_eq!(
+            scrub("word_shaped_cron_key_stays kept"),
+            "word_shaped_cron_key_stays kept"
+        );
         assert_eq!(scrub("  spaced\n    out  "), "spaced out");
     }
 
@@ -475,5 +510,38 @@ mod tests {
         let mut count = Count(0);
         log::kv::Source::visit(&WithSignature::new(&inner, &empty), &mut count).unwrap();
         assert_eq!(count.0, 1);
+    }
+
+    #[test]
+    fn rebuilt_record_carries_original_and_appended_kvs() {
+        struct Keys(Vec<String>);
+        impl<'k> log::kv::VisitSource<'k> for Keys {
+            fn visit_pair(
+                &mut self,
+                key: log::kv::Key<'k>,
+                _: log::kv::Value<'k>,
+            ) -> Result<(), log::kv::Error> {
+                self.0.push(key.as_str().to_owned());
+                Ok(())
+            }
+        }
+        let sig = Signature {
+            fingerprint: "f".into(),
+            scope: "s".into(),
+            root: "r".into(),
+        };
+        let inner: &[(&str, log::kv::Value<'_>)] = &[("error", log::kv::Value::from("boom"))];
+        let record = log::Record::builder()
+            .args(format_args!("m"))
+            .key_values(&inner)
+            .build();
+        let kvs = WithSignature::new(record.key_values(), &sig);
+        let rebuilt = record.to_builder().key_values(&kvs).build();
+        let mut keys = Keys(Vec::new());
+        rebuilt.key_values().visit(&mut keys).unwrap();
+        assert_eq!(
+            keys.0,
+            ["error", "error.fingerprint", "error.scope", "error.root"]
+        );
     }
 }

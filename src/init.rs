@@ -246,6 +246,7 @@ fn install_panic_logger() {
                 .unwrap_or("<non-string panic payload>");
             // force_capture: panic diagnostics must not depend on RUST_BACKTRACE being set.
             let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+            // signature::compute classifies panic records by this panic_location kv.
             log::error!(
                 target: PANIC_TARGET,
                 kind = "panic",
@@ -331,7 +332,9 @@ where
 
     fn log(&self, record: &log::Record<'_>) {
         if record.level() == log::Level::Error {
-            // compute runs inside the panic hook's own log path: it must never panic.
+            // The guard shields ordinary error logging from a compute bug. It cannot
+            // help on the panic-hook path (a panic while the hook runs aborts before
+            // unwinding), so compute is also written to be panic-free.
             let sig = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::signature::compute(record)
             }))
