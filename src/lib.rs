@@ -13,3 +13,6 @@ pub mod grpc;
 mod init;
 #[cfg(feature = "init")]
 pub use init::{init, init_with_baggage, Handle};
+
+#[cfg(feature = "init")]
+mod signature;

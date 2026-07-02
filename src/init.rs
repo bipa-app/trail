@@ -225,7 +225,7 @@ fn tracer(
 
 // Log target for the native panic hook. `Logger::log` keys off it to keep the
 // panic out of the Sentry sink (Sentry's PanicIntegration already captures it).
-const PANIC_TARGET: &str = "panic";
+pub(crate) const PANIC_TARGET: &str = "panic";
 
 // Native panic capture, independent of Sentry: a global hook that routes panics
 // through `log` (and thus to Loki via the OTLP bridge). Chains the previous hook
@@ -290,6 +290,33 @@ where
     otel: opentelemetry_appender_log::OpenTelemetryLogBridge<P, L>,
 }
 
+impl<P, L> Logger<P, L>
+where
+    P: opentelemetry::logs::LoggerProvider<Logger = L> + Send + Sync,
+    L: opentelemetry::logs::Logger + Send + Sync,
+{
+    // Forward to each sink on its own filter: env_logger's per-target RUST_LOG
+    // must not gate the OTLP/Loki export, or panic/error records whose target
+    // isn't in RUST_LOG (e.g. target "panic") would be dropped before Loki.
+    fn dispatch(&self, record: &log::Record<'_>) {
+        use log::Log as _;
+
+        if self.env.enabled(record.metadata()) {
+            self.env.log(record);
+        }
+        // Panics reach Sentry through the chained PanicIntegration hook (with a
+        // real backtrace); re-capturing the "panic" log record here would emit a
+        // second, lower-fidelity Sentry event per panic. Loki/stderr still get it.
+        #[cfg(feature = "sentry")]
+        if record.target() != PANIC_TARGET && self.sentry.enabled(record.metadata()) {
+            self.sentry.log(record);
+        }
+        if self.otel.enabled(record.metadata()) {
+            self.otel.log(record);
+        }
+    }
+}
+
 impl<P, L> log::Log for Logger<P, L>
 where
     P: opentelemetry::logs::LoggerProvider<Logger = L> + Send + Sync,
@@ -303,21 +330,16 @@ where
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        // Forward to each sink on its own filter: env_logger's per-target RUST_LOG
-        // must not gate the OTLP/Loki export, or panic/error records whose target
-        // isn't in RUST_LOG (e.g. target "panic") would be dropped before Loki.
-        if self.env.enabled(record.metadata()) {
-            self.env.log(record);
-        }
-        // Panics reach Sentry through the chained PanicIntegration hook (with a
-        // real backtrace); re-capturing the "panic" log record here would emit a
-        // second, lower-fidelity Sentry event per panic. Loki/stderr still get it.
-        #[cfg(feature = "sentry")]
-        if record.target() != PANIC_TARGET && self.sentry.enabled(record.metadata()) {
-            self.sentry.log(record);
-        }
-        if self.otel.enabled(record.metadata()) {
-            self.otel.log(record);
+        if record.level() == log::Level::Error {
+            // compute runs inside the panic hook's own log path: it must never panic.
+            let sig = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::signature::compute(record)
+            }))
+            .unwrap_or_default();
+            let kvs = crate::signature::WithSignature::new(record.key_values(), &sig);
+            self.dispatch(&record.to_builder().key_values(&kvs).build());
+        } else {
+            self.dispatch(record);
         }
     }
 
