@@ -379,8 +379,46 @@ impl sentry::Integration for SentryOtel {
 
 #[cfg(test)]
 mod tests {
-    use super::text_map_propagator;
+    use super::{install_panic_logger, text_map_propagator, PANIC_TARGET};
     use opentelemetry::propagation::TextMapPropagator as _;
+
+    // Pins the hook ↔ signature contract end-to-end: the kv names the real hook
+    // emits (panic_location etc.) must classify the record as a panic in compute.
+    #[test]
+    fn panic_hook_record_reaches_compute_with_a_panic_scope() {
+        static CAPTURED: std::sync::Mutex<Option<crate::signature::Signature>> =
+            std::sync::Mutex::new(None);
+
+        struct Capture;
+        impl log::Log for Capture {
+            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+                true
+            }
+            fn log(&self, record: &log::Record<'_>) {
+                if record.target() == PANIC_TARGET {
+                    *CAPTURED.lock().unwrap() = Some(crate::signature::compute(record));
+                }
+            }
+            fn flush(&self) {}
+        }
+
+        log::set_boxed_logger(Box::new(Capture)).expect("no other test sets a logger");
+        log::set_max_level(log::LevelFilter::Error);
+        // silence the default stderr printer; becomes the chained `previous` hook
+        std::panic::set_hook(Box::new(|_| {}));
+        install_panic_logger();
+
+        let _ = std::thread::spawn(|| panic!("boom")).join();
+
+        let sig = CAPTURED
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("hook logged no record");
+        assert_eq!(sig.scope, file!());
+        assert_eq!(sig.root, "panic: boom");
+        assert!(!sig.fingerprint.is_empty());
+    }
 
     #[test]
     fn text_map_propagator_includes_baggage_when_enabled() {

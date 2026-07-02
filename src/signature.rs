@@ -10,7 +10,7 @@
 //! panic site's file instead of the module, which is constant for every
 //! panic (the hook's own log site).
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Signature {
     pub fingerprint: String,
     pub scope: String,
@@ -40,12 +40,14 @@ pub(crate) fn compute(record: &log::Record<'_>) -> Signature {
     let chain = kv.chain.or(kv.chain_fallback);
     let (chain_component, root) = match chain.as_deref().map(strip_backtrace) {
         Some(chain) => {
-            // root must derive from the same capped slice the hash sees, or two
-            // chains equal up to the cap could share a fingerprint yet split on root.
-            let capped = truncate_chars(chain, 4096);
+            // Scrub before capping: dynamic tokens vary in width, so capping raw
+            // text would land the boundary at shifting offsets and fragment >cap
+            // chains. Root and hash derive from the same capped view.
+            let normalized = normalize_chain(chain);
+            let capped = truncate_chars(&normalized, 4096);
             (
-                scrub(capped),
-                truncate_chars(&root_line(capped), 80).to_owned(),
+                capped.to_owned(),
+                truncate_chars(root_line(capped), 80).to_owned(),
             )
         }
         None => (String::new(), truncate_chars(&msg, 80).to_owned()),
@@ -95,8 +97,10 @@ impl<'k> log::kv::VisitSource<'k> for Collected {
                 }
             }
             "panic_location" => self.panic_location = Some(value.to_string()),
+            // the hook's backtrace kv is huge and never chain-shaped; skip the render
+            "kind" | "backtrace" => {}
             _ => {
-                if self.chain_fallback.is_none() {
+                if self.chain.is_none() && self.chain_fallback.is_none() {
                     let rendered = value.to_string();
                     if rendered.contains("\nCaused by:") {
                         self.chain_fallback = Some(rendered);
@@ -151,20 +155,32 @@ fn strip_backtrace(chain: &str) -> &str {
     }
 }
 
-// Last non-empty line of the chain = the root cause; anyhow numbers multi-cause
-// chains ("1: text"), so strip that ordinal.
-fn root_line(chain: &str) -> String {
-    let last = chain
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default()
-        .trim();
-    let stripped = match last.split_once(": ") {
-        Some((n, rest)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => rest,
-        _ => last,
-    };
-    scrub(stripped)
+// Scrub line-by-line (keeping line structure for root extraction), dropping
+// blanks. Stops once the hash cap is comfortably exceeded.
+fn normalize_chain(chain: &str) -> String {
+    let mut out = String::with_capacity(chain.len().min(4096));
+    for line in chain.lines() {
+        let scrubbed = scrub(line);
+        if scrubbed.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&scrubbed);
+        // 4 bytes/char worst case: past this the 4096-char cap is guaranteed reached
+        if out.len() >= 4 * 4096 {
+            break;
+        }
+    }
+    out
+}
+
+// Last line of the normalized chain = the root cause; the scrub turned anyhow's
+// multi-cause "N:" ordinals into "#", so strip that marker.
+fn root_line(normalized: &str) -> &str {
+    let last = normalized.lines().next_back().unwrap_or_default();
+    last.strip_prefix("# ").unwrap_or(last)
 }
 
 fn strip_line_col(location: &str) -> &str {
@@ -217,8 +233,20 @@ fn is_dynamic(token: &str) -> bool {
         return false;
     }
     let digits = core.chars().filter(|c| c.is_ascii_digit()).count();
+    // digit-plus-separator tokens are values (amounts, ratios, percentages), and
+    // a short trailing unit ("30000ms") doesn't save them
+    let stem = core.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let stem = if core.len() - stem.len() <= 3 {
+        stem
+    } else {
+        core
+    };
+    let numeric_shaped = !stem.is_empty()
+        && stem.bytes().any(|b| b.is_ascii_digit())
+        && !stem.bytes().any(|b| b.is_ascii_alphabetic());
     digits == core.chars().count()
         || digits >= 6
+        || numeric_shaped
         || (core.len() >= 8 && core.chars().all(|c| c.is_ascii_hexdigit()))
         // long mixed alphanumerics are opaque blobs (base64, jwt segments, tokens)
         || (core.len() >= 20 && digits >= 2)
@@ -465,6 +493,14 @@ mod tests {
         assert_eq!(
             scrub("word_shaped_cron_key_stays kept"),
             "word_shaped_cron_key_stays kept"
+        );
+        assert_eq!(scrub("ratio 1.43 below minimum"), "ratio # below minimum");
+        assert_eq!(scrub("valor 12,34 recusado"), "valor # recusado");
+        assert_eq!(scrub("rate 0.5% too low"), "rate # too low");
+        assert_eq!(scrub("timeout after 30000ms"), "timeout after #");
+        assert_eq!(
+            scrub("utf8 parse failed for v2"),
+            "utf8 parse failed for v2"
         );
         assert_eq!(scrub("  spaced\n    out  "), "spaced out");
     }
