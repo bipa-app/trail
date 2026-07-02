@@ -410,6 +410,9 @@ mod tests {
 
         let _ = std::thread::spawn(|| panic!("boom")).join();
 
+        // restore the default printer so later failing tests keep their panic output
+        drop(std::panic::take_hook());
+
         let sig = CAPTURED
             .lock()
             .unwrap()
