@@ -225,7 +225,7 @@ fn tracer(
 
 // Log target for the native panic hook. `Logger::log` keys off it to keep the
 // panic out of the Sentry sink (Sentry's PanicIntegration already captures it).
-const PANIC_TARGET: &str = "panic";
+pub(crate) const PANIC_TARGET: &str = "panic";
 
 // Native panic capture, independent of Sentry: a global hook that routes panics
 // through `log` (and thus to Loki via the OTLP bridge). Chains the previous hook
@@ -246,6 +246,7 @@ fn install_panic_logger() {
                 .unwrap_or("<non-string panic payload>");
             // force_capture: panic diagnostics must not depend on RUST_BACKTRACE being set.
             let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+            // signature::compute classifies panic records by this panic_location kv.
             log::error!(
                 target: PANIC_TARGET,
                 kind = "panic",
@@ -290,6 +291,33 @@ where
     otel: opentelemetry_appender_log::OpenTelemetryLogBridge<P, L>,
 }
 
+impl<P, L> Logger<P, L>
+where
+    P: opentelemetry::logs::LoggerProvider<Logger = L> + Send + Sync,
+    L: opentelemetry::logs::Logger + Send + Sync,
+{
+    // Forward to each sink on its own filter: env_logger's per-target RUST_LOG
+    // must not gate the OTLP/Loki export, or panic/error records whose target
+    // isn't in RUST_LOG (e.g. target "panic") would be dropped before Loki.
+    fn dispatch(&self, record: &log::Record<'_>) {
+        use log::Log as _;
+
+        if self.env.enabled(record.metadata()) {
+            self.env.log(record);
+        }
+        // Panics reach Sentry through the chained PanicIntegration hook (with a
+        // real backtrace); re-capturing the "panic" log record here would emit a
+        // second, lower-fidelity Sentry event per panic. Loki/stderr still get it.
+        #[cfg(feature = "sentry")]
+        if record.target() != PANIC_TARGET && self.sentry.enabled(record.metadata()) {
+            self.sentry.log(record);
+        }
+        if self.otel.enabled(record.metadata()) {
+            self.otel.log(record);
+        }
+    }
+}
+
 impl<P, L> log::Log for Logger<P, L>
 where
     P: opentelemetry::logs::LoggerProvider<Logger = L> + Send + Sync,
@@ -303,21 +331,18 @@ where
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        // Forward to each sink on its own filter: env_logger's per-target RUST_LOG
-        // must not gate the OTLP/Loki export, or panic/error records whose target
-        // isn't in RUST_LOG (e.g. target "panic") would be dropped before Loki.
-        if self.env.enabled(record.metadata()) {
-            self.env.log(record);
-        }
-        // Panics reach Sentry through the chained PanicIntegration hook (with a
-        // real backtrace); re-capturing the "panic" log record here would emit a
-        // second, lower-fidelity Sentry event per panic. Loki/stderr still get it.
-        #[cfg(feature = "sentry")]
-        if record.target() != PANIC_TARGET && self.sentry.enabled(record.metadata()) {
-            self.sentry.log(record);
-        }
-        if self.otel.enabled(record.metadata()) {
-            self.otel.log(record);
+        if record.level() == log::Level::Error {
+            // The guard shields ordinary error logging from a compute bug. It cannot
+            // help on the panic-hook path (a panic while the hook runs aborts before
+            // unwinding), so compute is also written to be panic-free.
+            let sig = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::signature::compute(record)
+            }))
+            .unwrap_or_default();
+            let kvs = crate::signature::WithSignature::new(record.key_values(), &sig);
+            self.dispatch(&record.to_builder().key_values(&kvs).build());
+        } else {
+            self.dispatch(record);
         }
     }
 
@@ -354,8 +379,49 @@ impl sentry::Integration for SentryOtel {
 
 #[cfg(test)]
 mod tests {
-    use super::text_map_propagator;
+    use super::{install_panic_logger, text_map_propagator, PANIC_TARGET};
     use opentelemetry::propagation::TextMapPropagator as _;
+
+    // Pins the hook ↔ signature contract end-to-end: the kv names the real hook
+    // emits (panic_location etc.) must classify the record as a panic in compute.
+    #[test]
+    fn panic_hook_record_reaches_compute_with_a_panic_scope() {
+        static CAPTURED: std::sync::Mutex<Option<crate::signature::Signature>> =
+            std::sync::Mutex::new(None);
+
+        struct Capture;
+        impl log::Log for Capture {
+            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+                true
+            }
+            fn log(&self, record: &log::Record<'_>) {
+                if record.target() == PANIC_TARGET {
+                    *CAPTURED.lock().unwrap() = Some(crate::signature::compute(record));
+                }
+            }
+            fn flush(&self) {}
+        }
+
+        log::set_boxed_logger(Box::new(Capture)).expect("no other test sets a logger");
+        log::set_max_level(log::LevelFilter::Error);
+        // silence the default stderr printer; becomes the chained `previous` hook
+        std::panic::set_hook(Box::new(|_| {}));
+        install_panic_logger();
+
+        let _ = std::thread::spawn(|| panic!("boom")).join();
+
+        // restore the default printer so later failing tests keep their panic output
+        drop(std::panic::take_hook());
+
+        let sig = CAPTURED
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("hook logged no record");
+        assert_eq!(sig.scope, file!());
+        assert_eq!(sig.root, "panic: boom");
+        assert!(!sig.fingerprint.is_empty());
+    }
 
     #[test]
     fn text_map_propagator_includes_baggage_when_enabled() {
