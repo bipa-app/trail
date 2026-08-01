@@ -269,12 +269,10 @@ fn sentry(
 ) {
     let sentry = sentry::init((
         dsn.to_owned(),
-        sentry::ClientOptions {
-            release: Some(std::borrow::Cow::Owned(String::from(version))),
-            ..Default::default()
-        }
-        .add_integration(sentry::integrations::panic::PanicIntegration::new())
-        .add_integration(SentryOtel),
+        sentry::ClientOptions::new()
+            .release(std::borrow::Cow::Owned(String::from(version)))
+            .add_integration(sentry::integrations::panic::PanicIntegration::new())
+            .add_integration(SentryOtel),
     ));
 
     (sentry, sentry_log::SentryLogger::new())
