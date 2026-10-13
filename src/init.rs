@@ -8,9 +8,34 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// Flush buffered logs before a fatal exit and report whether the final
+    /// batch reached the collector — so a last ERROR lands in Loki instead of
+    /// relying on the best-effort `Drop` shutdown (whose result only hits
+    /// stderr, which prod does not scrape). Terminal: shuts the logger down, so
+    /// call it only right before exiting.
+    ///
+    /// `force_flush` carries the true export result but the SDK caps its wait at
+    /// 5s; `shutdown_with_timeout` waits for a slow export but discards the
+    /// result — so do both: flush for a real ack on the fast path, then drain
+    /// with a 12s window so a slower export can finish before the process exits.
+    /// `Ok` = exported and acknowledged (within 5s). `Err` = not acknowledged in
+    /// that window; the record may still land via the drain, so it is not proof
+    /// of loss. A backlog larger than one export can outlast the window.
+    pub fn drain_logs(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+        let flushed = self.logger_provider.force_flush();
+        let _ = self
+            .logger_provider
+            .shutdown_with_timeout(std::time::Duration::from_secs(12));
+        flushed
+    }
+
     pub fn shutdown(&self) {
+        // `drain_logs` may have already shut the logger down — expected, not an
+        // error worth surfacing on a crashing process's triage stderr.
         if let Err(e) = self.logger_provider.shutdown() {
-            eprintln!("Error during logger shutdown: {:?}", e);
+            if !matches!(e, opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown) {
+                eprintln!("Error during logger shutdown: {:?}", e);
+            }
         }
         if let Err(e) = self.tracer_provider.shutdown() {
             eprintln!("Error during tracer shutdown: {:?}", e);
