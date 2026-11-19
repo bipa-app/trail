@@ -325,6 +325,14 @@ mod tests {
         assert!(sig.fingerprint.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
+    // The exact value, so a change to how records are prepared before compute (the
+    // logger rewrites them to one line now) shows up as a broken pin, not as a wave of
+    // new-error alerts in production.
+    #[test]
+    fn real_prod_record_fingerprint_is_pinned() {
+        assert_eq!(turbo_signature(TURBO_CHAIN).fingerprint, "4f3484fb07ecb91d");
+    }
+
     #[test]
     fn interpolated_ids_do_not_change_the_fingerprint() {
         let a = turbo_signature(TURBO_CHAIN);

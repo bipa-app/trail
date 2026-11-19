@@ -15,4 +15,7 @@ mod init;
 pub use init::{init, init_with_baggage, Handle};
 
 #[cfg(feature = "init")]
+mod one_line;
+
+#[cfg(feature = "init")]
 mod signature;

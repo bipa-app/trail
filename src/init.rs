@@ -73,7 +73,7 @@ pub fn init_with_baggage(
     let meter_provider = meter(otel_endpoint, name, version, instance)?;
 
     let env_logger = env_logger::Builder::new()
-        .write_style(env_logger::fmt::WriteStyle::Always)
+        .write_style(env_logger::fmt::WriteStyle::Auto)
         .parse_filters(rust_log)
         .build();
 
@@ -329,18 +329,57 @@ where
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        if record.level() == log::Level::Error {
-            // The guard shields ordinary error logging from a compute bug. It cannot
-            // help on the panic-hook path (a panic while the hook runs aborts before
-            // unwinding), so compute is also written to be panic-free.
-            let sig = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Identity comes from the record as written, before it is rewritten to one
+        // line, so fingerprints don't change; only the printed scope and root are
+        // cleaned. The guards shield ordinary logging from a bug here or a panicking
+        // formatter in the record. They cannot help on the panic-hook path (a panic
+        // while the hook runs aborts before unwinding), so this code is also written
+        // to be panic-free.
+        let mut sig = if record.level() == log::Level::Error {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::signature::compute(record)
             }))
-            .unwrap_or_default();
-            let kvs = crate::signature::WithSignature::new(record.key_values(), &sig);
-            self.dispatch(&record.to_builder().key_values(&kvs).build());
+            .unwrap_or_default()
         } else {
-            self.dispatch(record);
+            crate::signature::Signature::default()
+        };
+        sig.scope = crate::one_line::clean(&sig.scope).into_owned();
+        sig.root = crate::one_line::clean(&sig.root).into_owned();
+
+        if crate::one_line::fits(record) {
+            let kvs = crate::signature::WithSignature::new(record.key_values(), &sig);
+            return self.dispatch(&record.to_builder().key_values(&kvs).build());
+        }
+        let rewritten = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::one_line::Record::new(record)
+        }));
+        let Ok(rewritten) = rewritten else {
+            // Not the original pairs or interpolated body: a formatter in them is what
+            // panicked. A literal body can't, so it is kept.
+            let none: &[(&str, log::kv::Value<'_>)] = &[];
+            let kvs = crate::signature::WithSignature::new(&none, &sig);
+            let body = match record.args().as_str() {
+                Some(literal) => crate::one_line::clean(literal),
+                None => "log record dropped: rewriting it to one line panicked".into(),
+            };
+            return self.dispatch(
+                &record
+                    .to_builder()
+                    .args(format_args!("{body}"))
+                    .key_values(&kvs)
+                    .build(),
+            );
+        };
+        let kvs = crate::signature::WithSignature::new(&rewritten, &sig);
+        match rewritten.body.as_deref() {
+            Some(body) => self.dispatch(
+                &record
+                    .to_builder()
+                    .args(format_args!("{body}"))
+                    .key_values(&kvs)
+                    .build(),
+            ),
+            None => self.dispatch(&record.to_builder().key_values(&kvs).build()),
         }
     }
 
@@ -437,5 +476,90 @@ mod tests {
 
         assert!(fields.contains(&"traceparent"));
         assert!(!fields.contains(&"baggage"));
+    }
+
+    // The real logger, end to end: stderr through a pipe, OTLP through the SDK's
+    // in-memory exporter, both fed one error record carrying an anyhow report.
+    #[test]
+    fn an_error_report_reaches_every_sink_on_one_line() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Pipe(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Pipe {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().write(buf)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct Report;
+        impl std::fmt::Debug for Report {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("balances\n\nCaused by:\n    0: failed to get prices for BTC\n    1: couldn't find global balance snapshots")
+            }
+        }
+
+        let stderr = Pipe::default();
+        let exporter = opentelemetry_sdk::logs::InMemoryLogExporter::default();
+        let provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let logger = super::Logger {
+            env: env_logger::Builder::new()
+                .filter_level(log::LevelFilter::Info)
+                .write_style(env_logger::fmt::WriteStyle::Never)
+                .target(env_logger::Target::Pipe(Box::new(stderr.clone())))
+                .build(),
+            #[cfg(feature = "sentry")]
+            sentry: sentry_log::SentryLogger::new(),
+            otel: opentelemetry_appender_log::OpenTelemetryLogBridge::new(&provider),
+        };
+
+        let report = Report;
+        let kvs = [
+            ("user_id", log::kv::Value::from(42)),
+            ("e", log::kv::Value::from_debug(&report)),
+        ];
+        let record = log::Record::builder()
+            .level(log::Level::Error)
+            .target("bipa::grpc::balances")
+            .module_path(Some("bipa::grpc::balances"))
+            .args(format_args!("balances failed"))
+            .key_values(&kvs)
+            .build();
+        let expected = crate::signature::compute(&record);
+        log::Log::log(&logger, &record);
+
+        let printed = String::from_utf8(stderr.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(printed.matches('\n').count(), 1, "{printed}");
+        assert!(
+            printed.contains("e=balances\\n\\nCaused by:\\n    0: failed to get prices for BTC"),
+            "{printed}"
+        );
+
+        let logs = exporter.get_emitted_logs().unwrap();
+        let [log] = logs.as_slice() else {
+            panic!("expected one exported record, got {}", logs.len());
+        };
+        let attribute = |key: &str| {
+            log.record
+                .attributes_iter()
+                .find(|(k, _)| k.as_str() == key)
+                .map(|(_, v)| v.clone())
+        };
+        let string = |key: &str| match attribute(key) {
+            Some(opentelemetry::logs::AnyValue::String(s)) => Some(s.as_str().to_owned()),
+            _ => None,
+        };
+        assert!(string("e").is_some_and(|e| !e.contains('\n')));
+        // Identity is computed before the rewrite, so it doesn't move.
+        assert_eq!(string("error.fingerprint"), Some(expected.fingerprint));
+        assert_eq!(string("error.root"), Some(expected.root));
+        assert!(matches!(
+            attribute("user_id"),
+            Some(opentelemetry::logs::AnyValue::Int(42))
+        ));
     }
 }
