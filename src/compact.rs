@@ -70,10 +70,14 @@ const SIGNATURE_RESERVE: usize =
     pair("error.fingerprint", 16) + pair("error.scope", SCOPE_MAX) + pair("error.root", ROOT_MAX);
 const ORIGIN_RESERVE: usize = pair(ORIGIN_KEY, ORIGIN_MAX);
 const DROPPED_RESERVE: usize = pair(DROPPED_KEY, 20);
-/// The record's metadata sinks print or export: target (stderr), module path and
-/// file (OTLP `code.*`), each made one line of at most [`METADATA_MAX`], and the line.
+/// The record's metadata sinks print or export: the target (stderr and OTLP), and the
+/// file, line and module path (OTLP `code.*`), each made one line of at most
+/// [`METADATA_MAX`]. Charged with the names the OTLP bridge gives them.
 pub(crate) const METADATA_MAX: usize = 128;
-const METADATA_RESERVE: usize = 3 * (METADATA_MAX + 2) + 10;
+const METADATA_RESERVE: usize = pair("target", METADATA_MAX)
+    + pair("code.file.path", METADATA_MAX)
+    + pair("code.line.number", 10)
+    + pair("code.function.name", METADATA_MAX);
 /// What the body and the record's own pairs share.
 const SHARED: usize =
     RECORD_MAX - SIGNATURE_RESERVE - ORIGIN_RESERVE - DROPPED_RESERVE - METADATA_RESERVE;
