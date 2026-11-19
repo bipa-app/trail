@@ -66,7 +66,7 @@ fn message_component(record: &log::Record<'_>) -> String {
     if let Some(template) = record.args().as_str() {
         return template.to_owned();
     }
-    let rendered = record.args().to_string();
+    let rendered = crate::compact::render(record.args());
     let first_line = strip_backtrace(&rendered)
         .split("\nCaused by:")
         .next()
@@ -93,15 +93,15 @@ impl<'k> log::kv::VisitSource<'k> for Collected {
         match key.as_str() {
             "e" | "err" | "error" | "reason" | "cause" | "why" => {
                 if self.chain.is_none() {
-                    self.chain = Some(value.to_string());
+                    self.chain = Some(crate::compact::render(value));
                 }
             }
             "panic_location" => self.panic_location = Some(value.to_string()),
-            // the hook's frames are never chain-shaped; skip the render
-            "kind" | "error.origin" => {}
+            // the hook's backtrace kv is huge and never chain-shaped; skip the render
+            "kind" | "backtrace" => {}
             _ => {
                 if self.chain.is_none() && self.chain_fallback.is_none() {
-                    let rendered = value.to_string();
+                    let rendered = crate::compact::render(value);
                     if rendered.contains("\nCaused by:") {
                         self.chain_fallback = Some(rendered);
                     }

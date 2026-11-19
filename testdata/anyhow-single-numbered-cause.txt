@@ -1,0 +1,40 @@
+request failed
+
+Caused by:
+    404: Not Found
+
+Stack backtrace:
+   0: msg<&str>
+             at /home/nic/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.104/src/backtrace.rs:10:14
+   1: format_err
+             at /home/nic/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.104/src/lib.rs:687:13
+   2: main
+             at ./src/main.rs:14:49
+   3: call_once<fn(), ()>
+             at /nix/store/9fka43d216qw4vz7qwsj5x4cxf5z1zmk-rust-minimal-1.101.0-nightly-2026-11-07/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+   4: __rust_begin_short_backtrace<fn(), ()>
+             at /nix/store/9fka43d216qw4vz7qwsj5x4cxf5z1zmk-rust-minimal-1.101.0-nightly-2026-11-07/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166:18
+   5: std::rt::lang_start::<()>::{closure#0}
+             at /nix/store/9fka43d216qw4vz7qwsj5x4cxf5z1zmk-rust-minimal-1.101.0-nightly-2026-11-07/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+   6: <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/core/src/ops/function.rs:287:21
+   7: std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:573:43
+   8: std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:541:19
+   9: std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panic.rs:359:14
+  10: std::rt::lang_start_internal::{closure#0}
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/rt.rs:175:24
+  11: std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:573:43
+  12: std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:541:19
+  13: std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panic.rs:359:14
+  14: std::rt::lang_start_internal
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/rt.rs:171:5
+  15: main
+  16: __libc_start_call_main
+  17: __libc_start_main_impl
+  18: _start

@@ -11,6 +11,8 @@ pub mod grpc;
 
 #[cfg(feature = "init")]
 mod compact;
+#[cfg(feature = "init")]
+pub use compact::application_crates;
 
 #[cfg(feature = "init")]
 mod init;

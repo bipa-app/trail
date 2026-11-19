@@ -1,0 +1,88 @@
+outer
+
+Caused by:
+    0: c0
+    1: wrapped: middle ctx
+       
+       Caused by:
+           0: helper ctx
+           1: root cause
+       
+       Stack backtrace:
+          0: msg<&str>
+                    at /home/nic/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.104/src/backtrace.rs:10:14
+          1: helper
+                    at ./src/main.rs:3:55
+          2: middle
+                    at ./src/main.rs:4:54
+          3: nested_mid
+                    at ./src/main.rs:6:13
+          4: main
+                    at ./src/main.rs:13:36
+          5: call_once<fn(), ()>
+                    at /nix/store/9fka43d216qw4vz7qwsj5x4cxf5z1zmk-rust-minimal-1.101.0-nightly-2026-11-07/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+          6: __rust_begin_short_backtrace<fn(), ()>
+                    at /nix/store/9fka43d216qw4vz7qwsj5x4cxf5z1zmk-rust-minimal-1.101.0-nightly-2026-11-07/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166:18
+          7: std::rt::lang_start::<()>::{closure#0}
+                    at /nix/store/9fka43d216qw4vz7qwsj5x4cxf5z1zmk-rust-minimal-1.101.0-nightly-2026-11-07/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+          8: <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once
+                    at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/core/src/ops/function.rs:287:21
+          9: std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32>
+                    at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:573:43
+         10: std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync>
+                    at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:541:19
+         11: std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32>
+                    at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panic.rs:359:14
+         12: std::rt::lang_start_internal::{closure#0}
+                    at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/rt.rs:175:24
+         13: std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize>
+                    at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:573:43
+         14: std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}>
+                    at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:541:19
+         15: std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize>
+                    at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panic.rs:359:14
+         16: std::rt::lang_start_internal
+                    at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/rt.rs:171:5
+         17: main
+         18: __libc_start_call_main
+         19: __libc_start_main_impl
+         20: _start
+    2: disk gone
+
+Stack backtrace:
+   0: ext_context<core::io::error::Error, alloc::string::String>
+             at /home/nic/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.104/src/backtrace.rs:10:14
+   1: context<(), core::io::error::Error, alloc::string::String>
+             at /home/nic/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/anyhow-1.0.104/src/context.rs:54:37
+   2: nested_mid
+             at ./src/main.rs:8:13
+   3: main
+             at ./src/main.rs:13:36
+   4: call_once<fn(), ()>
+             at /nix/store/9fka43d216qw4vz7qwsj5x4cxf5z1zmk-rust-minimal-1.101.0-nightly-2026-11-07/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+   5: __rust_begin_short_backtrace<fn(), ()>
+             at /nix/store/9fka43d216qw4vz7qwsj5x4cxf5z1zmk-rust-minimal-1.101.0-nightly-2026-11-07/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166:18
+   6: std::rt::lang_start::<()>::{closure#0}
+             at /nix/store/9fka43d216qw4vz7qwsj5x4cxf5z1zmk-rust-minimal-1.101.0-nightly-2026-11-07/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+   7: <&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/core/src/ops/function.rs:287:21
+   8: std::panicking::catch_unwind::do_call::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:573:43
+   9: std::panicking::catch_unwind::<i32, &dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:541:19
+  10: std::panic::catch_unwind::<&dyn core::ops::function::Fn<(), Output = i32> + core::panic::unwind_safe::RefUnwindSafe + core::marker::Sync, i32>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panic.rs:359:14
+  11: std::rt::lang_start_internal::{closure#0}
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/rt.rs:175:24
+  12: std::panicking::catch_unwind::do_call::<std::rt::lang_start_internal::{closure#0}, isize>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:573:43
+  13: std::panicking::catch_unwind::<isize, std::rt::lang_start_internal::{closure#0}>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panicking.rs:541:19
+  14: std::panic::catch_unwind::<std::rt::lang_start_internal::{closure#0}, isize>
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/panic.rs:359:14
+  15: std::rt::lang_start_internal
+             at /rustc/c980177d81d16f843a500905ac98c0cf3af1fd8d/library/std/src/rt.rs:171:5
+  16: main
+  17: __libc_start_call_main
+  18: __libc_start_main_impl
+  19: _start

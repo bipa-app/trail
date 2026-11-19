@@ -82,6 +82,7 @@ pub fn init_with_baggage(
     log::set_max_level(env_logger.filter());
     log::set_boxed_logger(Box::new(Logger {
         env: env_logger,
+        panic_stderr: panic_stderr(),
         #[cfg(feature = "sentry")]
         sentry: sentry_logger,
         otel: otel_logger,
@@ -224,19 +225,27 @@ fn tracer(
 }
 
 // Log target for the native panic hook. `Logger::log` keys off it to keep the
-// panic out of the Sentry sink (Sentry's PanicIntegration already captures it).
+// panic out of the Sentry sink (Sentry's PanicIntegration already captures it) and
+// to print it on stderr whatever RUST_LOG says.
 pub(crate) const PANIC_TARGET: &str = "panic";
 
+fn panic_stderr() -> env_logger::Logger {
+    env_logger::Builder::new()
+        .write_style(env_logger::fmt::WriteStyle::Auto)
+        .filter_level(log::LevelFilter::Error)
+        .build()
+}
+
 // Native panic capture, independent of Sentry: a global hook that routes panics
-// through `log` (and thus to Loki via the OTLP bridge). Chains the previous hook
-// so it composes with Sentry's PanicIntegration while Sentry is enabled, and
-// falls back to the default hook once Sentry is dropped.
+// through `log`, to stderr as one line and to Loki via the OTLP bridge. It replaces
+// the hook it finds instead of chaining it: std's default printer would add the
+// whole multi-line trace, and Sentry's PanicIntegration hook chains that printer.
+// With Sentry enabled, its handler is called directly instead.
 fn install_panic_logger() {
     // Install exactly once so repeated init calls don't stack panic hooks.
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
+        std::panic::set_hook(Box::new(|info| {
             let location = info.location().map(|l| l.to_string()).unwrap_or_default();
             let message = info
                 .payload()
@@ -244,20 +253,27 @@ fn install_panic_logger() {
                 .copied()
                 .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
                 .unwrap_or("<non-string panic payload>");
-            // force_capture: panic diagnostics must not depend on RUST_BACKTRACE being set.
-            // Only the application frames are logged, as for errors; the chained default
-            // hook still prints the whole trace to stderr.
-            let backtrace = std::backtrace::Backtrace::force_capture().to_string();
-            let origin = crate::compact::backtrace_origin(&backtrace).unwrap_or_default();
-            // signature::compute classifies panic records by this panic_location kv.
-            log::error!(
-                target: PANIC_TARGET,
-                kind = "panic",
-                panic_location = location.as_str(),
-                "error.origin" = origin.as_str();
-                "panic: {message}"
-            );
-            previous(info);
+            if log::max_level() == log::LevelFilter::Off {
+                // RUST_LOG=off disables the logger, not the report of a panic.
+                eprintln!(
+                    "panic: {} panic_location={location}",
+                    crate::compact::single_line(message, 1024)
+                );
+            } else {
+                // force_capture: panic diagnostics must not depend on RUST_BACKTRACE
+                // being set. The logger reduces it to `error.origin` and prints no more.
+                let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+                // signature::compute classifies panic records by this panic_location kv.
+                log::error!(
+                    target: PANIC_TARGET,
+                    kind = "panic",
+                    panic_location = location.as_str(),
+                    backtrace = backtrace.as_str();
+                    "panic: {message}"
+                );
+            }
+            #[cfg(feature = "sentry")]
+            sentry::integrations::panic::panic_handler(info);
         }));
     });
 }
@@ -287,6 +303,7 @@ where
     L: opentelemetry::logs::Logger + Send + Sync,
 {
     env: env_logger::Logger,
+    panic_stderr: env_logger::Logger,
     #[cfg(feature = "sentry")]
     sentry: sentry_log::SentryLogger<sentry_log::NoopLogger>,
     otel: opentelemetry_appender_log::OpenTelemetryLogBridge<P, L>,
@@ -303,7 +320,9 @@ where
     fn dispatch(&self, record: &log::Record<'_>) {
         use log::Log as _;
 
-        if self.env.enabled(record.metadata()) {
+        if record.target() == PANIC_TARGET {
+            self.panic_stderr.log(record);
+        } else if self.env.enabled(record.metadata()) {
             self.env.log(record);
         }
         // Panics reach Sentry through the chained PanicIntegration hook (with a
@@ -333,11 +352,12 @@ where
 
     fn log(&self, record: &log::Record<'_>) {
         // Identity comes from the record as written, before compaction rewrites it, so
-        // fingerprints and error.root stay what they were. The guards shield ordinary
-        // logging from a bug in either step. They cannot help on the panic-hook path (a
-        // panic while the hook runs aborts before unwinding), so both are also written
-        // to be panic-free.
-        let sig = if record.level() == log::Level::Error {
+        // fingerprints stay what they were; only its printed scope and root are made
+        // one bounded line. The guards shield ordinary logging from a bug here or a
+        // panicking formatter in the record. They cannot help on the panic-hook path
+        // (a panic while the hook runs aborts before unwinding), so this code is also
+        // written to be panic-free.
+        let mut sig = if record.level() == log::Level::Error {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::signature::compute(record)
             }))
@@ -345,15 +365,31 @@ where
         } else {
             crate::signature::Signature::default()
         };
+        sig.scope = crate::compact::single_line(&sig.scope, crate::compact::SCOPE_MAX).into_owned();
+        sig.root = crate::compact::single_line(&sig.root, crate::compact::ROOT_MAX).into_owned();
+
+        if crate::compact::fits(record) {
+            let kvs = crate::signature::WithSignature::new(record.key_values(), &sig);
+            return self.dispatch(&record.to_builder().key_values(&kvs).build());
+        }
         let compact = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::compact::Record::new(record)
         }));
         let Ok(compact) = compact else {
-            let kvs = crate::signature::WithSignature::new(record.key_values(), &sig);
-            return self.dispatch(&record.to_builder().key_values(&kvs).build());
+            // Not the original: its formatter is what may have panicked.
+            let none: &[(&str, log::kv::Value<'_>)] = &[];
+            let kvs = crate::signature::WithSignature::new(&none, &sig);
+            return self.dispatch(
+                &record
+                    .to_builder()
+                    .args(format_args!(
+                        "log record dropped: rewriting it to one line panicked"
+                    ))
+                    .key_values(&kvs)
+                    .build(),
+            );
         };
-        let pairs = compact.pairs();
-        let kvs = crate::signature::WithSignature::new(&pairs, &sig);
+        let kvs = crate::signature::WithSignature::new(&compact, &sig);
         match compact.body.as_deref() {
             Some(body) => self.dispatch(
                 &record
@@ -497,6 +533,7 @@ mod tests {
                 .write_style(env_logger::fmt::WriteStyle::Never)
                 .target(env_logger::Target::Pipe(Box::new(stderr.clone())))
                 .build(),
+            panic_stderr: super::panic_stderr(),
             #[cfg(feature = "sentry")]
             sentry: sentry_log::SentryLogger::new(),
             otel: opentelemetry_appender_log::OpenTelemetryLogBridge::new(&provider),
@@ -527,6 +564,13 @@ mod tests {
             "{printed}"
         );
         assert!(printed.contains("error.origin=bipa::features::liquid_quote_parts::assemble_price_bag <- bipa::grpc::Server::get_card_config"), "{printed}");
+        // Everything after env_logger's `[timestamp LEVEL target] ` header.
+        let (_, emitted) = printed.split_once("] ").unwrap();
+        assert!(
+            emitted.trim_end().len() <= crate::compact::RECORD_MAX,
+            "{}",
+            emitted.len()
+        );
 
         let logs = exporter.get_emitted_logs().unwrap();
         let [log] = logs.as_slice() else {
@@ -552,9 +596,20 @@ mod tests {
         // Fingerprint and root are computed before compaction, so they don't move.
         assert_eq!(attribute("error.fingerprint"), Some(expected.fingerprint));
         assert_eq!(attribute("error.root"), Some(expected.root));
+        let attributes: Vec<String> = log
+            .record
+            .attributes_iter()
+            .map(|(_, v)| format!("{v:?}"))
+            .collect();
+        assert!(
+            attributes.iter().all(|v| !v.contains("\\n")),
+            "{attributes:?}"
+        );
+        // Numbers stay typed through the OTLP bridge.
         assert!(log
             .record
             .attributes_iter()
-            .all(|(_, v)| !format!("{v:?}").contains("\\n")));
+            .any(|(k, v)| k.as_str() == "user_id"
+                && matches!(v, opentelemetry::logs::AnyValue::Int(42))));
     }
 }
