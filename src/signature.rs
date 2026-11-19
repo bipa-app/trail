@@ -66,7 +66,7 @@ fn message_component(record: &log::Record<'_>) -> String {
     if let Some(template) = record.args().as_str() {
         return template.to_owned();
     }
-    let rendered = crate::compact::render(record.args());
+    let rendered = record.args().to_string();
     let first_line = strip_backtrace(&rendered)
         .split("\nCaused by:")
         .next()
@@ -93,7 +93,7 @@ impl<'k> log::kv::VisitSource<'k> for Collected {
         match key.as_str() {
             "e" | "err" | "error" | "reason" | "cause" | "why" => {
                 if self.chain.is_none() {
-                    self.chain = Some(crate::compact::render(value));
+                    self.chain = Some(value.to_string());
                 }
             }
             "panic_location" => self.panic_location = Some(value.to_string()),
@@ -101,7 +101,7 @@ impl<'k> log::kv::VisitSource<'k> for Collected {
             "kind" | "backtrace" => {}
             _ => {
                 if self.chain.is_none() && self.chain_fallback.is_none() {
-                    let rendered = crate::compact::render(value);
+                    let rendered = value.to_string();
                     if rendered.contains("\nCaused by:") {
                         self.chain_fallback = Some(rendered);
                     }
@@ -331,6 +331,16 @@ mod tests {
     #[test]
     fn real_prod_record_fingerprint_is_pinned() {
         assert_eq!(turbo_signature(TURBO_CHAIN).fingerprint, "4f3484fb07ecb91d");
+    }
+
+    // Identity reads the whole value, however long: a provider dump of 70,000 digits
+    // still scrubs to the same token and keeps its root.
+    #[test]
+    fn huge_values_keep_their_identity() {
+        let huge = turbo_signature(&format!("{} root failure", "0".repeat(70_000)));
+        let short = turbo_signature("0 root failure");
+        assert_eq!(huge.root, "root failure");
+        assert_eq!(huge.fingerprint, short.fingerprint);
     }
 
     #[test]

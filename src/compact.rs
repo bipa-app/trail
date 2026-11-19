@@ -10,7 +10,8 @@
 //!   first backtrace becomes `error.origin`, the application frames only
 //!   (`a::f <- b::g`), so the call path still shows on stderr when OTLP is down;
 //! - any other text keeps its content, with line breaks and control characters
-//!   escaped (`\n`, `\t`, `\u{1b}`), as logfmt and JSON do;
+//!   escaped (`\n`, `\t`, `\u{1b}`) and ANSI colour codes dropped. Backslashes are
+//!   not escaped, so a literal `\n` in the text reads like an escaped line break;
 //! - keys, values and the body are capped on UTF-8 boundaries, and the whole record,
 //!   the pairs appended after it included, fits [`RECORD_MAX`].
 //!
@@ -69,8 +70,13 @@ const SIGNATURE_RESERVE: usize =
     pair("error.fingerprint", 16) + pair("error.scope", SCOPE_MAX) + pair("error.root", ROOT_MAX);
 const ORIGIN_RESERVE: usize = pair(ORIGIN_KEY, ORIGIN_MAX);
 const DROPPED_RESERVE: usize = pair(DROPPED_KEY, 20);
+/// The record's metadata sinks print or export: target (stderr), module path and
+/// file (OTLP `code.*`), each made one line of at most [`METADATA_MAX`], and the line.
+pub(crate) const METADATA_MAX: usize = 128;
+const METADATA_RESERVE: usize = 3 * (METADATA_MAX + 2) + 10;
 /// What the body and the record's own pairs share.
-const SHARED: usize = RECORD_MAX - SIGNATURE_RESERVE - ORIGIN_RESERVE - DROPPED_RESERVE;
+const SHARED: usize =
+    RECORD_MAX - SIGNATURE_RESERVE - ORIGIN_RESERVE - DROPPED_RESERVE - METADATA_RESERVE;
 
 /// Keys whose values are errors: served first and given the larger cap.
 fn is_error_key(key: &str) -> bool {
@@ -196,31 +202,41 @@ pub(crate) fn single_line(text: &str, max: usize) -> Cow<'_, str> {
     }
 }
 
-/// Skips an ANSI CSI sequence (`ESC [ … final`) at the start of `chars`, returning
-/// whether there was one. Colour codes are presentation, not content.
+/// Skips an ANSI CSI sequence (`ESC [ params final`) at the start of `chars`,
+/// returning whether there was one. Colour codes are presentation, not content. An
+/// `ESC [` without a final byte within 32 characters is not one, and is kept.
 fn skip_ansi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
     if chars.peek() != Some(&'[') {
         return false;
     }
-    chars.next();
-    for c in chars.by_ref().take(32) {
-        if ('\u{40}'..='\u{7e}').contains(&c) {
-            break;
-        }
+    let mut ahead = chars.clone();
+    ahead.next();
+    let Some(len) = ahead
+        .take(32)
+        .position(|c| ('\u{40}'..='\u{7e}').contains(&c))
+    else {
+        return false;
+    };
+    for _ in 0..len + 2 {
+        chars.next();
     }
     true
 }
 
 fn escaped(text: &str, max: usize) -> String {
-    // Escaping never shrinks text beyond what ANSI codes take, so a bounded amount
-    // of input reaches the output.
-    let mut end = text.len().min(2 * max + 64);
+    // Reads at most RENDER_MAX bytes, and stops once the output passes `max`.
+    let mut end = text.len().min(RENDER_MAX);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    let mut out = String::with_capacity(end.min(max) + 16);
+    let mut out = String::with_capacity(max.min(end) + 16);
     let mut chars = text.get(..end).unwrap_or_default().chars().peekable();
+    let mut complete = end == text.len();
     while let Some(c) = chars.next() {
+        if out.len() > max {
+            complete = false;
+            break;
+        }
         match c {
             '\u{1b}' if skip_ansi(&mut chars) => {}
             '\n' => out.push_str("\\n"),
@@ -232,7 +248,7 @@ fn escaped(text: &str, max: usize) -> String {
             c => out.push(c),
         }
     }
-    let total = if end == text.len() && out.len() <= max {
+    let total = if complete && out.len() <= max {
         out.len()
     } else {
         text.len()
@@ -315,8 +331,16 @@ fn report<'a>(lines: &[&'a str]) -> Option<Report<'a>> {
             headers.pop();
         }
         if in_causes {
+            // Ordinals only when anyhow wrote them: `0: ` followed, at the same
+            // indent, by `1: `. A single cause may start with a number of its own.
             let numbering = match headers.last_mut() {
-                Some((_, n @ None)) => *n.insert(trimmed.starts_with("0: ")),
+                Some((_, n @ None)) => *n.insert(
+                    trimmed.starts_with("0: ")
+                        && lines.get(at + 1..).is_some_and(|rest| {
+                            rest.iter()
+                                .any(|l| indent_of(l) == indent && l.trim().starts_with("1: "))
+                        }),
+                ),
                 Some((_, Some(n))) => *n,
                 None => false,
             };
@@ -340,14 +364,13 @@ fn report<'a>(lines: &[&'a str]) -> Option<Report<'a>> {
 }
 
 /// The application frames of a bare backtrace (as `Backtrace` displays), for the
-/// panic hook.
+/// panic hook: numbered symbols and the unnumbered inlined ones under them.
 pub(crate) fn backtrace_origin(backtrace: &str) -> Option<String> {
-    origin(
-        backtrace
-            .lines()
-            .take(LINES_MAX)
-            .filter_map(|l| frame_symbol(l.trim())),
-    )
+    origin(backtrace.lines().take(LINES_MAX).filter_map(|l| {
+        let trimmed = l.trim();
+        let inlined = !trimmed.is_empty() && !trimmed.starts_with("at ") && indent_of(l) > 0;
+        frame_symbol(trimmed).or(inlined.then_some(trimmed))
+    }))
 }
 
 fn append(segments: &mut [String], text: &str) {
@@ -401,7 +424,7 @@ fn origin<'a>(frames: impl Iterator<Item = &'a str>) -> Option<String> {
         if count == ORIGIN_FRAMES {
             break;
         }
-        let name = simplify(frame);
+        let name = without_controls(&simplify(frame));
         if name == previous || !is_application(&name) {
             continue;
         }
@@ -626,6 +649,15 @@ pub(crate) fn fits(record: &log::Record<'_>) -> bool {
     if body.len() > BODY_MAX || body.contains(char::is_control) {
         return false;
     }
+    let clean_meta = |m: Option<&str>| {
+        m.is_none_or(|m| m.len() <= METADATA_MAX && !m.contains(char::is_control))
+    };
+    if !clean_meta(Some(record.target()))
+        || !clean_meta(record.module_path())
+        || !clean_meta(record.file())
+    {
+        return false;
+    }
     struct Check {
         used: usize,
         ok: bool,
@@ -718,20 +750,23 @@ impl<'a> Record<'a> {
                 if is_error_key(name) != errors_pass {
                     continue;
                 }
-                if name == BACKTRACE_KEY {
+                // The panic hook's captured trace becomes the origin; on any other
+                // record `backtrace` is an ordinary pair.
+                if name == BACKTRACE_KEY && record.target() == crate::init::PANIC_TARGET {
                     if origin.is_none() {
                         origin = backtrace_origin(&render(value));
                     }
-                    continue;
-                }
-                if RESERVED.contains(&name) {
-                    dropped += 1;
                     continue;
                 }
                 let key: Cow<'a, str> = match key.to_borrowed_str() {
                     Some(k) if clean_key(k) => Cow::Borrowed(k),
                     _ => Cow::Owned(single_line(key.as_str(), KEY_MAX).into_owned()),
                 };
+                // Checked on the key as emitted: cleaning can turn one into a reserved name.
+                if RESERVED.contains(&key.as_ref()) {
+                    dropped += 1;
+                    continue;
+                }
                 let room = SHARED.saturating_sub(used + pair(&key, 0));
                 if room < MIN_SLICE {
                     dropped += 1;
@@ -1291,6 +1326,76 @@ mod tests {
                     .iter()
                     .all(|(k, v)| k.len() <= KEY_MAX && !v.contains('\n')));
             },
+        );
+    }
+
+    #[test]
+    fn generated_origins_and_cleaned_keys_hold_the_contract() {
+        let dirty = "outer\n\nCaused by:\n    root\n\nStack backtrace:\n   0: bipa::read\tfile\u{1b}[31m\n   1: bipa::b::g";
+        let origin = line(dirty, 1024).origin.unwrap();
+        assert!(!origin.contains(char::is_control), "{origin:?}");
+
+        let spoof = [
+            (
+                "\u{1b}[31merror.origin\u{1b}[0m",
+                log::kv::Value::from("spoofed"),
+            ),
+            ("e", log::kv::Value::from(TURBO)),
+        ];
+        let record = log::Record::builder()
+            .level(log::Level::Error)
+            .args(format_args!("renew failed"))
+            .key_values(&spoof)
+            .build();
+        emitted(&record, |out| {
+            let pairs = pairs_of(out);
+            assert_eq!(pairs.iter().filter(|(k, _)| k == ORIGIN_KEY).count(), 1);
+            assert!(pairs.iter().all(|(_, v)| v != "spoofed"));
+        });
+    }
+
+    #[test]
+    fn backtrace_is_an_ordinary_pair_outside_the_panic_hook() {
+        let kvs = [(
+            "backtrace",
+            log::kv::Value::from("disabled: diagnostic context"),
+        )];
+        let record = log::Record::builder()
+            .target("bipa::x")
+            .args(format_args!("started"))
+            .key_values(&kvs)
+            .build();
+        let compact = Record::new(&record);
+        assert!(compact.pairs.iter().any(|(k, _)| k == "backtrace"));
+    }
+
+    #[test]
+    fn colour_codes_never_crowd_out_the_text() {
+        let text = format!("{}READY", "\u{1b}[31m".repeat(300));
+        assert_eq!(line(&text, 64).text, "READY");
+        // Without a final byte it isn't a colour code: kept, escaped.
+        let unterminated = format!("x \u{1b}[{} tail", "1234567890".repeat(4));
+        assert_eq!(
+            line(&unterminated, 256).text,
+            format!("x \\u{{1b}}[{} tail", "1234567890".repeat(4))
+        );
+    }
+
+    #[test]
+    fn inlined_symbols_count_in_a_bare_backtrace() {
+        let bare = "   0: std::backtrace::Backtrace::force_capture\n   1: tokio::runtime::task::poll\n      bipa::jobs::run\n             at ./src/jobs.rs:3:3\n   2: std::rt::lang_start";
+        assert_eq!(backtrace_origin(bare).as_deref(), Some("bipa::jobs::run"));
+    }
+
+    #[test]
+    fn a_single_cause_numbered_zero_keeps_its_number() {
+        use anyhow::{anyhow, Context};
+        let e = Err::<(), _>(anyhow!("0: Not Found"))
+            .context("request failed")
+            .unwrap_err();
+        assert_eq!(
+            line(&format!("{e:?}"), ERROR_VALUE_MAX).text,
+            "request failed: 0: Not Found"
         );
     }
 }
