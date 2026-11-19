@@ -73,7 +73,7 @@ pub fn init_with_baggage(
     let meter_provider = meter(otel_endpoint, name, version, instance)?;
 
     let env_logger = env_logger::Builder::new()
-        .write_style(env_logger::fmt::WriteStyle::Always)
+        .write_style(env_logger::fmt::WriteStyle::Auto)
         .parse_filters(rust_log)
         .build();
 
@@ -245,13 +245,16 @@ fn install_panic_logger() {
                 .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
                 .unwrap_or("<non-string panic payload>");
             // force_capture: panic diagnostics must not depend on RUST_BACKTRACE being set.
+            // Only the application frames are logged, as for errors; the chained default
+            // hook still prints the whole trace to stderr.
             let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+            let origin = crate::compact::backtrace_origin(&backtrace).unwrap_or_default();
             // signature::compute classifies panic records by this panic_location kv.
             log::error!(
                 target: PANIC_TARGET,
                 kind = "panic",
                 panic_location = location.as_str(),
-                backtrace = backtrace.as_str();
+                "error.origin" = origin.as_str();
                 "panic: {message}"
             );
             previous(info);
@@ -329,18 +332,37 @@ where
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        if record.level() == log::Level::Error {
-            // The guard shields ordinary error logging from a compute bug. It cannot
-            // help on the panic-hook path (a panic while the hook runs aborts before
-            // unwinding), so compute is also written to be panic-free.
-            let sig = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Identity comes from the record as written, before compaction rewrites it, so
+        // fingerprints and error.root stay what they were. The guards shield ordinary
+        // logging from a bug in either step. They cannot help on the panic-hook path (a
+        // panic while the hook runs aborts before unwinding), so both are also written
+        // to be panic-free.
+        let sig = if record.level() == log::Level::Error {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::signature::compute(record)
             }))
-            .unwrap_or_default();
-            let kvs = crate::signature::WithSignature::new(record.key_values(), &sig);
-            self.dispatch(&record.to_builder().key_values(&kvs).build());
+            .unwrap_or_default()
         } else {
-            self.dispatch(record);
+            crate::signature::Signature::default()
+        };
+        let compact = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::compact::Record::new(record)
+        }));
+        let Ok(compact) = compact else {
+            let kvs = crate::signature::WithSignature::new(record.key_values(), &sig);
+            return self.dispatch(&record.to_builder().key_values(&kvs).build());
+        };
+        let pairs = compact.pairs();
+        let kvs = crate::signature::WithSignature::new(&pairs, &sig);
+        match compact.body.as_deref() {
+            Some(body) => self.dispatch(
+                &record
+                    .to_builder()
+                    .args(format_args!("{body}"))
+                    .key_values(&kvs)
+                    .build(),
+            ),
+            None => self.dispatch(&record.to_builder().key_values(&kvs).build()),
         }
     }
 
@@ -437,5 +459,102 @@ mod tests {
 
         assert!(fields.contains(&"traceparent"));
         assert!(!fields.contains(&"baggage"));
+    }
+
+    // The real logger, end to end: stderr through a pipe, OTLP through the SDK's
+    // in-memory exporter, both fed one error record carrying an anyhow-shaped chain
+    // and backtrace (as `e:?` renders it in production).
+    #[test]
+    fn an_error_with_a_backtrace_reaches_every_sink_as_one_bounded_line() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Pipe(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Pipe {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().write(buf)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct Chain;
+        impl std::fmt::Debug for Chain {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("balances\n\nCaused by:\n    0: failed to get prices for BTC\n    1: couldn't find global balance snapshots\n\nStack backtrace:\n   0: <core::option::Option<T> as anyhow::Context<T, E>>::context::<&str>\n   1: bipa::features::liquid_quote_parts::assemble_price_bag::{closure#0}\n   2: <opentelemetry::context::future_ext::WithContext<F> as core::future::future::Future>::poll\n   3: <bipa::grpc::Server as bipa_grpc_proto::mobile::mobile_server::Mobile>::get_card_config::{closure#0}\n   4: <tokio::runtime::scheduler::multi_thread::worker::Context>::run_task")
+            }
+        }
+
+        let stderr = Pipe::default();
+        let exporter = opentelemetry_sdk::logs::InMemoryLogExporter::default();
+        let provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let logger = super::Logger {
+            env: env_logger::Builder::new()
+                .filter_level(log::LevelFilter::Info)
+                .write_style(env_logger::fmt::WriteStyle::Never)
+                .target(env_logger::Target::Pipe(Box::new(stderr.clone())))
+                .build(),
+            #[cfg(feature = "sentry")]
+            sentry: sentry_log::SentryLogger::new(),
+            otel: opentelemetry_appender_log::OpenTelemetryLogBridge::new(&provider),
+        };
+
+        let chain = Chain;
+        let kvs = [
+            ("user_id", log::kv::Value::from(42)),
+            ("e", log::kv::Value::from_debug(&chain)),
+        ];
+        let record = log::Record::builder()
+            .level(log::Level::Error)
+            .target("bipa::grpc::balances")
+            .module_path(Some("bipa::grpc::balances"))
+            .args(format_args!("balances failed"))
+            .key_values(&kvs)
+            .build();
+        let expected = crate::signature::compute(&record);
+        log::Log::log(&logger, &record);
+
+        let printed = String::from_utf8(stderr.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(printed.matches('\n').count(), 1, "{printed}");
+        assert!(!printed.contains("Stack backtrace"), "{printed}");
+        assert!(
+            printed.contains(
+                "e=balances: failed to get prices for BTC: couldn't find global balance snapshots"
+            ),
+            "{printed}"
+        );
+        assert!(printed.contains("error.origin=bipa::features::liquid_quote_parts::assemble_price_bag <- bipa::grpc::Server::get_card_config"), "{printed}");
+
+        let logs = exporter.get_emitted_logs().unwrap();
+        let [log] = logs.as_slice() else {
+            panic!("expected one exported record, got {}", logs.len());
+        };
+        let attribute = |key: &str| {
+            log.record
+                .attributes_iter()
+                .find(|(k, _)| k.as_str() == key)
+                .map(|(_, v)| match v {
+                    opentelemetry::logs::AnyValue::String(s) => s.as_str().to_owned(),
+                    other => format!("{other:?}"),
+                })
+        };
+        assert_eq!(
+            attribute("e").as_deref(),
+            Some("balances: failed to get prices for BTC: couldn't find global balance snapshots")
+        );
+        assert_eq!(
+            attribute("error.origin").as_deref(),
+            Some("bipa::features::liquid_quote_parts::assemble_price_bag <- bipa::grpc::Server::get_card_config")
+        );
+        // Fingerprint and root are computed before compaction, so they don't move.
+        assert_eq!(attribute("error.fingerprint"), Some(expected.fingerprint));
+        assert_eq!(attribute("error.root"), Some(expected.root));
+        assert!(log
+            .record
+            .attributes_iter()
+            .all(|(_, v)| !format!("{v:?}").contains("\\n")));
     }
 }

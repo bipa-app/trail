@@ -97,8 +97,8 @@ impl<'k> log::kv::VisitSource<'k> for Collected {
                 }
             }
             "panic_location" => self.panic_location = Some(value.to_string()),
-            // the hook's backtrace kv is huge and never chain-shaped; skip the render
-            "kind" | "backtrace" => {}
+            // the hook's frames are never chain-shaped; skip the render
+            "kind" | "error.origin" => {}
             _ => {
                 if self.chain.is_none() && self.chain_fallback.is_none() {
                     let rendered = value.to_string();
@@ -323,6 +323,14 @@ mod tests {
         assert_eq!(sig.root, "should have configs");
         assert_eq!(sig.fingerprint.len(), 16);
         assert!(sig.fingerprint.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    // The exact value, so a change to how records are prepared before compute (the
+    // logger compacts them now) shows up as a broken pin, not as a wave of new-error
+    // alerts in production.
+    #[test]
+    fn real_prod_record_fingerprint_is_pinned() {
+        assert_eq!(turbo_signature(TURBO_CHAIN).fingerprint, "4f3484fb07ecb91d");
     }
 
     #[test]

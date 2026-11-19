@@ -10,6 +10,9 @@ pub use baggage_span_processor::BaggageSpanProcessor;
 pub mod grpc;
 
 #[cfg(feature = "init")]
+mod compact;
+
+#[cfg(feature = "init")]
 mod init;
 #[cfg(feature = "init")]
 pub use init::{init, init_with_baggage, Handle};
